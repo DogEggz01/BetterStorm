@@ -14,7 +14,7 @@
 - Add Storm relocate distance slider in Configurator. You can increase it to reduce the chance you met storm (since this mod add more storm).
 ## Custom storm
 - All custom storm can be toggle off seperately.
-- Add 3 squalls: Very fast-moving super heavy rain storm. Very small area and fast transition. Have different wind strength.
+- Add 3 squalls: Very fast-moving super heavy rain storm. Very small area. Have different wind strength.
   - These show up in all area.
 ### Regional special storm
 - Add Sandstorm: Fast moving pile of sand but smaller radius. Bad visibility, everything yellow, your boat get dirty fast.
