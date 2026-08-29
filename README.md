@@ -1,6 +1,7 @@
 # BetterStorm
 *Disclaimer: This mod is made with ChatGPT 5.6 Sol*
 ## Universal storm changes
+- Chronos sea now is more dangerous, it will have more storm occuring.
 - Storm wind bonus now start increasing at storm effect radius, and reach maximum at (storm core radius/2).
 - Lighting now happen in the maximum storm wind area, so you can know approximately where it is.
 - Lighting now spawn in circulus area, instead of vanilla square area.
