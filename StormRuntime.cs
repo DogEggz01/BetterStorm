@@ -260,30 +260,6 @@ namespace BetterStorm
         internal static ModStormController Hurricane { get; private set; }
         internal static ModStormController Sandstorm { get; private set; }
 
-        internal static bool AnyMediStormEnabled
-        {
-            get
-            {
-                BetterStormPlugin plugin = BetterStormPlugin.Instance;
-                if (plugin == null)
-                {
-                    return false;
-                }
-
-                for (int i = 0; i < StormCatalog.Custom.Length; i++)
-                {
-                    StormDefinition definition = StormCatalog.Custom[i];
-                    if (definition.AllowsRegion("Region Medi East") &&
-                        plugin.IsEnabled(definition.Id))
-                    {
-                        return true;
-                    }
-                }
-
-                return false;
-            }
-        }
-
         internal static void Initialize(WeatherStorms weatherStorms)
         {
             if (weatherStorms == null)
@@ -365,7 +341,6 @@ namespace BetterStorm
                 StormAccess.Storms(weatherStorms) = combined;
                 initialized = true;
                 ApplyEnabledState();
-                MediEastStormSetting.Apply(AnyMediStormEnabled);
                 RefreshSandstormCloudVisuals();
                 GlobalLightningSettings.ApplyToLiveStorms();
                 BetterStormPlugin.Instance?.LogFeatureInfo(
@@ -468,34 +443,6 @@ namespace BetterStorm
         }
     }
 
-    internal static class MediEastStormSetting
-    {
-        private static Region mediEast;
-        private static int originalStormCount;
-
-        internal static void Apply(bool enabled)
-        {
-            if (mediEast == null)
-            {
-                Region[] regions = UnityEngine.Object.FindObjectsOfType<Region>();
-                for (int i = 0; i < regions.Length; i++)
-                {
-                    if (regions[i].gameObject.name == "Region Medi East")
-                    {
-                        mediEast = regions[i];
-                        originalStormCount = regions[i].stormCount;
-                        break;
-                    }
-                }
-            }
-
-            if (mediEast != null)
-            {
-                mediEast.stormCount = enabled ? 3 : originalStormCount;
-            }
-        }
-    }
-
     [HarmonyPatch(typeof(WeatherStorms), "Start")]
     internal static class WeatherStormsStartPatch
     {
@@ -528,6 +475,21 @@ namespace BetterStorm
             WanderingStorm best = null;
             float bestNormalized = float.MaxValue;
             float bestDistance = float.MaxValue;
+            StormKind bestKind = StormKind.Vanilla;
+
+            bool currentIsAvailable = false;
+            float currentNormalized = float.MaxValue;
+            float currentDistance = float.MaxValue;
+            StormKind currentKind = StormKind.Vanilla;
+
+            WanderingStorm sandstormOverride = null;
+            float sandstormOverrideNormalized = float.MaxValue;
+            float sandstormOverrideDistance = float.MaxValue;
+            StormKind sandstormOverrideKind = StormKind.Vanilla;
+
+            WanderingStorm dryThunderstormOverride = null;
+            float dryThunderstormOverrideNormalized = float.MaxValue;
+            float dryThunderstormOverrideDistance = float.MaxValue;
 
             for (int i = 0; i < ___storms.Length; i++)
             {
@@ -540,24 +502,100 @@ namespace BetterStorm
                 float distance = Vector3.Distance(
                     ___player.position,
                     storm.transform.position);
-                float normalized = StormInfluenceService.NormalizeForSelection(
+                StormInfluence influence = StormInfluenceService.Evaluate(
                     __instance,
                     storm,
                     distance);
+                float normalized = influence.NormalizedDistance;
+                StormKind kind = influence.Kind;
 
-                if (normalized < bestNormalized ||
-                    (Mathf.Approximately(normalized, bestNormalized) &&
-                     distance < bestDistance))
+                if (StormSelectionRules.IsBetterCandidate(
+                        normalized,
+                        distance,
+                        bestNormalized,
+                        bestDistance))
                 {
                     best = storm;
                     bestNormalized = normalized;
                     bestDistance = distance;
+                    bestKind = kind;
+                }
+
+                if (storm == ___currentStorm)
+                {
+                    currentIsAvailable = true;
+                    currentNormalized = normalized;
+                    currentDistance = distance;
+                    currentKind = kind;
+                }
+
+                if (kind != StormKind.Sandstorm &&
+                    StormSelectionRules.ShouldSandstormYield(
+                        StormKind.Sandstorm,
+                        kind,
+                        distance,
+                        influence.Radius,
+                        influence.WeatherRange) &&
+                    StormSelectionRules.IsBetterCandidate(
+                        normalized,
+                        distance,
+                        sandstormOverrideNormalized,
+                        sandstormOverrideDistance))
+                {
+                    sandstormOverride = storm;
+                    sandstormOverrideNormalized = normalized;
+                    sandstormOverrideDistance = distance;
+                    sandstormOverrideKind = kind;
+                }
+
+                if (kind == StormKind.Squall &&
+                    StormSelectionRules.ShouldDryThunderstormYield(
+                        StormKind.DryThunderstorm,
+                        kind,
+                        distance,
+                        influence.Radius) &&
+                    StormSelectionRules.IsBetterCandidate(
+                        normalized,
+                        distance,
+                        dryThunderstormOverrideNormalized,
+                        dryThunderstormOverrideDistance))
+                {
+                    dryThunderstormOverride = storm;
+                    dryThunderstormOverrideNormalized = normalized;
+                    dryThunderstormOverrideDistance = distance;
                 }
             }
 
-            ___currentStorm = best;
-            WeatherStorms.currentStormDistance = best != null
-                ? bestDistance
+            WanderingStorm selected = best;
+            float selectedDistance = bestDistance;
+            StormKind selectedKind = bestKind;
+
+            if (currentIsAvailable &&
+                StormSelectionRules.ShouldRetainCurrent(currentNormalized))
+            {
+                selected = ___currentStorm;
+                selectedDistance = currentDistance;
+                selectedKind = currentKind;
+            }
+
+            if (selectedKind == StormKind.Sandstorm &&
+                sandstormOverride != null)
+            {
+                selected = sandstormOverride;
+                selectedDistance = sandstormOverrideDistance;
+                selectedKind = sandstormOverrideKind;
+            }
+
+            if (selectedKind == StormKind.DryThunderstorm &&
+                dryThunderstormOverride != null)
+            {
+                selected = dryThunderstormOverride;
+                selectedDistance = dryThunderstormOverrideDistance;
+            }
+
+            ___currentStorm = selected;
+            WeatherStorms.currentStormDistance = selected != null
+                ? selectedDistance
                 : 100000000f;
             return false;
         }
@@ -615,7 +653,6 @@ namespace BetterStorm
         [HarmonyAfter(new[] { BetterStormPlugin.BorderExpanderGuid })]
         private static void Postfix()
         {
-            MediEastStormSetting.Apply(ModStormFactory.AnyMediStormEnabled);
             ModStormFactory.ApplyEnabledState();
         }
     }

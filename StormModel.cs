@@ -147,26 +147,35 @@ namespace BetterStorm
             new StormDefinition
             {
                 Name = "Hurricane",
-                EnableDescription = "Enable the priority-3 Hurricane.",
+                EnableDescription =
+                    "Enable the priority-2 Hurricane in Medi East, Emerald, " +
+                    "and Emerald Lagoon only.",
                 SaveKey = "DogEggz.BetterStorm.hurricane-position.v2",
                 Id = CustomStormId.Hurricane,
                 Kind = StormKind.Hurricane,
                 InitialOffset = new Vector3(0f, 0f, -24000f),
-                Priority = 3,
+                Priority = 2,
                 Radius = 6000f,
                 ParticleDistance = 9960f,
                 MoveSpeed = 5.5f,
                 UsesFixedWeatherRange = false,
                 WindCoefficient = 34f,
                 RainTarget = 13f,
+                AllowedRegions = new HashSet<string>(StringComparer.Ordinal)
+                {
+                    "Region Medi East",
+                    "Region Emerald (new smaller)",
+                    "Region Emerald Lagoon"
+                },
                 AllowedClimateSeasons =
                     ClimateSeasonMask.Summer | ClimateSeasonMask.Autumn,
                 SupportsLightning = true,
                 Lightning = new LightningProfile(
                     interval: 12f,
                     spawnRadius: 3000f,
-                    schedulingDistance: 12500f,
-                    lightRange: 7980f,
+                    schedulingDistance: 18000f,
+                    audioSourceMaxDistance: 18000f,
+                    lightRange: 9960f,
                     strikeHeight: 500f,
                     lightIntensity: 4f)
             },
@@ -204,7 +213,7 @@ namespace BetterStorm
                     spawnRadius: 1800f,
                     schedulingDistance: 3200f,
                     audioSourceMaxDistance: 6400f,
-                    lightRange: 2250f,
+                    lightRange: 2394f,
                     strikeHeight: 500f,
                     lightIntensity: 4.5f)
             },
@@ -265,8 +274,9 @@ namespace BetterStorm
                 Lightning = new LightningProfile(
                     interval: 8f,
                     spawnRadius: 1350f,
-                    schedulingDistance: 2000f,
-                    lightRange: 1500f,
+                    schedulingDistance: 1800f,
+                    audioSourceMaxDistance: 3600f,
+                    lightRange: 1800f,
                     strikeHeight: 500f,
                     lightIntensity: 3f)
             };
@@ -425,6 +435,26 @@ namespace BetterStorm
             get { return CenterDistance < OuterEdge; }
         }
 
+        internal float NormalizedDistance
+        {
+            get
+            {
+                return Mathf.Clamp01(
+                    (CenterDistance - Radius) /
+                    Mathf.Max(0.0001f, WeatherRange));
+            }
+        }
+
+        internal StormKind Kind
+        {
+            get
+            {
+                return Definition != null
+                    ? Definition.Kind
+                    : StormKind.Vanilla;
+            }
+        }
+
         internal float WindLerp
         {
             get { return Mathf.InverseLerp(OuterEdge, Radius * 0.5f, CenterDistance); }
@@ -438,6 +468,55 @@ namespace BetterStorm
         internal bool IsSandstorm
         {
             get { return Definition != null && Definition.Kind == StormKind.Sandstorm; }
+        }
+    }
+
+    internal static class StormSelectionRules
+    {
+        internal const float RetainUntilNormalizedDistance = 0.66f;
+        internal const float SandstormYieldNormalizedDistance = 0.5f;
+
+        internal static bool ShouldRetainCurrent(float normalizedDistance)
+        {
+            return normalizedDistance <= RetainUntilNormalizedDistance;
+        }
+
+        internal static bool ShouldSandstormYield(
+            StormKind selectedKind,
+            StormKind candidateKind,
+            float candidateDistance,
+            float candidateRadius,
+            float candidateWeatherRange)
+        {
+            return selectedKind == StormKind.Sandstorm &&
+                candidateKind != StormKind.Sandstorm &&
+                candidateDistance < candidateRadius +
+                    candidateWeatherRange *
+                    SandstormYieldNormalizedDistance;
+        }
+
+        internal static bool ShouldDryThunderstormYield(
+            StormKind selectedKind,
+            StormKind candidateKind,
+            float candidateDistance,
+            float candidateRadius)
+        {
+            return selectedKind == StormKind.DryThunderstorm &&
+                candidateKind == StormKind.Squall &&
+                candidateDistance < candidateRadius;
+        }
+
+        internal static bool IsBetterCandidate(
+            float normalizedDistance,
+            float distance,
+            float bestNormalizedDistance,
+            float bestDistance)
+        {
+            return normalizedDistance < bestNormalizedDistance ||
+                (Mathf.Approximately(
+                     normalizedDistance,
+                     bestNormalizedDistance) &&
+                 distance < bestDistance);
         }
     }
 
@@ -496,10 +575,7 @@ namespace BetterStorm
             WanderingStorm storm,
             float distance)
         {
-            StormInfluence influence = Evaluate(weatherStorms, storm, distance);
-            return Mathf.Clamp01(
-                (distance - influence.Radius) /
-                Mathf.Max(0.0001f, influence.WeatherRange));
+            return Evaluate(weatherStorms, storm, distance).NormalizedDistance;
         }
 
         internal static float GetStormContribution(StormInfluence influence)

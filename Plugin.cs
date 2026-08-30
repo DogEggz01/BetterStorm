@@ -17,7 +17,7 @@ namespace BetterStorm
     {
         public const string PluginGuid = "DogEggz.BetterStorm";
         public const string PluginName = "Better Storm";
-        public const string PluginVersion = "1.0.8";
+        public const string PluginVersion = "1.0.9";
 
         public const string ChaoticWindGuid = "com.pete.sailwind.windconfigurator";
         public const string ClimateGuid = "com.raddude.climate";
@@ -77,7 +77,6 @@ namespace BetterStorm
         {
             Unsubscribe();
             WindOverrideState.RestoreImmediately();
-            MediEastStormSetting.Apply(false);
             SandstormVisuals.Shutdown();
             SandstormDirt.Reset();
             GlobalLightningSettings.RestoreSnapshots();
@@ -194,7 +193,6 @@ namespace BetterStorm
         private void OnStormToggleChanged(object sender, EventArgs e)
         {
             ModStormFactory.ApplyEnabledState();
-            MediEastStormSetting.Apply(ModStormFactory.AnyMediStormEnabled);
 
             if (!IsEnabled(CustomStormId.Sandstorm))
             {
@@ -209,7 +207,6 @@ namespace BetterStorm
         private void ApplyRuntimeSettings()
         {
             ModStormFactory.ApplyEnabledState();
-            MediEastStormSetting.Apply(ModStormFactory.AnyMediStormEnabled);
             ModStormFactory.RefreshSandstormCloudVisuals();
             GlobalLightningSettings.ApplyToLiveStorms();
         }
