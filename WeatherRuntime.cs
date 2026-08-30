@@ -533,7 +533,8 @@ namespace BetterStorm
         internal const int MaximumParticles = 20000;
         internal const float SpawnHeight = 50f;
         internal const float SpawnRadius = 150f;
-        internal const float ParticleAlpha = 0.25f;
+        internal const float ParticleMinimumAlpha = 0.1f;
+        internal const float ParticleMaximumAlpha = 0.25f;
         internal const float GravityModifier = 0.02f;
         private const float HorizontalNoiseStrength = 0.8f;
         private const float VerticalNoiseStrength = 0.15f;
@@ -691,7 +692,7 @@ namespace BetterStorm
             main.startSpeed = 0f;
             main.maxParticles = MaximumParticles;
             main.gravityModifier = GravityModifier;
-            main.startColor = GetSnowColor();
+            main.startColor = GetSnowColorRange();
             main.simulationSpace = ParticleSystemSimulationSpace.World;
 
             ParticleSystem.ShapeModule shape = snowParticles.shape;
@@ -749,11 +750,13 @@ namespace BetterStorm
             return true;
         }
 
-        private static Color GetSnowColor()
+        private static ParticleSystem.MinMaxGradient GetSnowColorRange()
         {
-            Color color = SnowColor;
-            color.a = ParticleAlpha;
-            return color;
+            Color minimum = SnowColor;
+            minimum.a = ParticleMinimumAlpha;
+            Color maximum = SnowColor;
+            maximum.a = ParticleMaximumAlpha;
+            return new ParticleSystem.MinMaxGradient(minimum, maximum);
         }
 
         private static void InstallSnowMaterial(
