@@ -15,7 +15,7 @@
 ## Custom storm
 - All custom storm can be toggle off seperately.
 - Add 3 squalls: Very fast-moving super heavy rain storm. Very small area. Have different wind strength.
-  - These show up in all area.
+  - These show up in all area and all season.
 ### Regional special storm
 - Add Sandstorm: Fast moving pile of sand but smaller radius. Bad visibility, everything yellow, your boat get dirty fast.
   - Only active in Al'Ankh Sea. Show up in Spring/Summer if climate custom wind enable.
@@ -26,6 +26,7 @@
 - Add Gentle Snow: Small size slow moving "Storm". Clear weather, gentle wind, snow.
   - Only active in north of 38N. Show up in Winter/Spring if Climate custom wind enable.
 - All regional special storm only spawn once. So it will be more rare.
+- There is a toggle option to let all storm active regardless of season.
 ## Bug fix
 - Fix thunder audio bug so it will play all 10 sound source. (Vanilla skip 2)
 - Thunder sound actually comes from where lighting strike, instead of always from latest lighting strike position.
