@@ -156,7 +156,7 @@ namespace BetterStorm
                 InitialOffset = new Vector3(0f, 0f, -24000f),
                 Priority = 2,
                 Radius = 6000f,
-                ParticleDistance = 9960f,
+                ParticleDistance = 18000f,
                 MoveSpeed = 5.5f,
                 UsesFixedWeatherRange = false,
                 WindCoefficient = 34f,
