@@ -172,6 +172,7 @@ namespace BetterStorm
 
                 controller.transform.position =
                     StormPositionCoordinates.ToRuntimeCoordinates(loadedPosition);
+                controller.EnsureValidInitialPlacement();
             }
 
             internal void Reset()
@@ -244,9 +245,7 @@ namespace BetterStorm
         private static void Prefix()
         {
             WindOverrideState.RestoreImmediately();
-            ThunderPoolRegistry.Shutdown();
-            SandstormVisuals.Shutdown();
-            SandstormDirt.Reset();
+            RuntimeEffectLifecycle.ShutdownTransientEffects();
             StormPositionPersistence.BeginLoadAll();
         }
     }

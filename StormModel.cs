@@ -13,7 +13,8 @@ namespace BetterStorm
         Squall3,
         Hurricane,
         DryThunderstorm,
-        Sandstorm
+        Sandstorm,
+        GentleSnow
     }
 
     internal enum StormKind
@@ -22,7 +23,8 @@ namespace BetterStorm
         Squall,
         Hurricane,
         DryThunderstorm,
-        Sandstorm
+        Sandstorm,
+        GentleSnow
     }
 
     internal readonly struct LightningProfile
@@ -98,6 +100,7 @@ namespace BetterStorm
         internal bool SupportsLightning;
         internal HashSet<string> AllowedRegions;
         internal ClimateSeasonMask AllowedClimateSeasons = ClimateSeasonMask.All;
+        internal float? MinimumLatitude;
         internal LightningProfile Lightning;
 
         internal bool AllowsRegion(string regionName)
@@ -242,6 +245,30 @@ namespace BetterStorm
                 {
                     "Region Al'ankh"
                 }
+            },
+            new StormDefinition
+            {
+                Name = "Gentle Snow",
+                EnableDescription =
+                    "Enable the priority-1 Gentle Snow above latitude 38.",
+                SaveKey = "DogEggz.BetterStorm.gentle-snow-position.v2",
+                Id = CustomStormId.GentleSnow,
+                Kind = StormKind.GentleSnow,
+                InitialOffset = new Vector3(12000f, 0f, 22000f),
+                Priority = 1,
+                Radius = 2500f,
+                ParticleDistance = 0f,
+                MoveSpeed = 4.5f,
+                UsesFixedWeatherRange = true,
+                FixedWeatherRange = 2000f,
+                WindCoefficient = 0f,
+                RainTarget = null,
+                SuppressRainParticles = true,
+                SuppressFog = true,
+                AllowedClimateSeasons =
+                    ClimateSeasonMask.Winter | ClimateSeasonMask.Spring,
+                SupportsLightning = false,
+                MinimumLatitude = GentleSnowRules.MinimumLatitude
             }
         };
 
@@ -332,6 +359,15 @@ namespace BetterStorm
                         " has invalid lightning audio distances.";
                     return false;
                 }
+
+                if (definition.MinimumLatitude.HasValue &&
+                    (definition.MinimumLatitude.Value < -90f ||
+                     definition.MinimumLatitude.Value > 90f))
+                {
+                    error = definition.Name +
+                        " has an invalid minimum latitude.";
+                    return false;
+                }
             }
 
             return true;
@@ -407,7 +443,6 @@ namespace BetterStorm
 
     internal readonly struct StormInfluence
     {
-        internal readonly ModStormController Controller;
         internal readonly StormDefinition Definition;
         internal readonly float CenterDistance;
         internal readonly float Radius;
@@ -421,7 +456,6 @@ namespace BetterStorm
             float radius,
             float weatherRange)
         {
-            Controller = controller;
             Definition = controller != null ? controller.Definition : null;
             CenterDistance = centerDistance;
             Radius = radius;
@@ -468,6 +502,51 @@ namespace BetterStorm
         internal bool IsSandstorm
         {
             get { return Definition != null && Definition.Kind == StormKind.Sandstorm; }
+        }
+
+        internal bool IsGentleSnow
+        {
+            get { return Definition != null && Definition.Kind == StormKind.GentleSnow; }
+        }
+    }
+
+    internal static class GentleSnowRules
+    {
+        internal const float MinimumLatitude = 38f;
+        internal const float ParkingLatitudeBuffer = 0.05f;
+        internal const float WorldUnitsPerLatitude = 9000f;
+        internal const float MaximumWindTarget = 18f;
+        internal const float FinalLerpSpeed = 0.25f;
+
+        internal static bool IsLatitudeAllowed(
+            float latitude,
+            float minimumLatitude)
+        {
+            return latitude >= minimumLatitude;
+        }
+
+        internal static float GetParkingLatitude(float minimumLatitude)
+        {
+            return minimumLatitude + ParkingLatitudeBuffer;
+        }
+
+        internal static float GetMinimumDistanceToLatitude(
+            float playerLatitude,
+            float targetLatitude)
+        {
+            return Mathf.Max(0f, targetLatitude - playerLatitude) *
+                WorldUnitsPerLatitude;
+        }
+
+        internal static bool ShouldPark(
+            float playerLatitude,
+            float minimumLatitude,
+            float relocationDistance)
+        {
+            return GetMinimumDistanceToLatitude(
+                       playerLatitude,
+                       GetParkingLatitude(minimumLatitude)) >
+                   relocationDistance;
         }
     }
 
@@ -568,27 +647,6 @@ namespace BetterStorm
 
             influence = Evaluate(weatherStorms, storm, distance);
             return influence.Inside;
-        }
-
-        internal static float NormalizeForSelection(
-            WeatherStorms weatherStorms,
-            WanderingStorm storm,
-            float distance)
-        {
-            return Evaluate(weatherStorms, storm, distance).NormalizedDistance;
-        }
-
-        internal static float GetStormContribution(StormInfluence influence)
-        {
-            if (!influence.Inside)
-            {
-                return 0f;
-            }
-
-            float coefficient = influence.Definition != null
-                ? influence.Definition.WindCoefficient
-                : 26f;
-            return coefficient * influence.WindLerp;
         }
 
         internal static float GetEffectiveWindLerp(

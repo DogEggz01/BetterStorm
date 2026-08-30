@@ -43,6 +43,7 @@ namespace BetterStorm
         private static float normalFinalLerpSpeed;
         private static bool overridesApplied;
         private static bool wasInsideSquall;
+        private static bool wasInsideGentleSnow;
 
         internal static void Tick()
         {
@@ -63,6 +64,7 @@ namespace BetterStorm
             {
                 RestoreForExit(wind);
                 wasInsideSquall = false;
+                wasInsideGentleSnow = false;
                 return;
             }
 
@@ -72,7 +74,9 @@ namespace BetterStorm
             }
 
             bool insideSquall = influence.IsSquall;
-            if (insideSquall && !wasInsideSquall)
+            bool insideGentleSnow = influence.IsGentleSnow;
+            if ((insideSquall && !wasInsideSquall) ||
+                (insideGentleSnow && !wasInsideGentleSnow))
             {
                 StormAccess.WindTimer(wind) = 0f;
                 StormAccess.GustTimer(wind) = 0f;
@@ -82,7 +86,9 @@ namespace BetterStorm
                 normalGustInterval,
                 StormCoreGustInterval,
                 influence.WindLerp);
-            wind.finalLerpSpeed = StormFinalLerpSpeed;
+            wind.finalLerpSpeed = insideGentleSnow
+                ? GentleSnowRules.FinalLerpSpeed
+                : StormFinalLerpSpeed;
             wind.gustChangeTimer = gustInterval;
             wind.changeTimer = insideSquall
                 ? GetNormalChangeTimer() * 0.5f
@@ -97,12 +103,15 @@ namespace BetterStorm
 
             overridesApplied = true;
             wasInsideSquall = insideSquall;
+            wasInsideGentleSnow = insideGentleSnow;
         }
 
         internal static void NotifyDebugSummon(StormKind kind)
         {
             Wind wind = Wind.instance;
-            if (kind != StormKind.Squall || wind == null)
+            if ((kind != StormKind.Squall &&
+                 kind != StormKind.GentleSnow) ||
+                wind == null)
             {
                 return;
             }
@@ -121,6 +130,7 @@ namespace BetterStorm
             trackedWind = null;
             overridesApplied = false;
             wasInsideSquall = false;
+            wasInsideGentleSnow = false;
         }
 
         private static void CaptureNormal(Wind wind)
@@ -416,9 +426,40 @@ namespace BetterStorm
                 return true;
             }
 
+            if (influence.IsGentleSnow)
+            {
+                ___currentGustTarget = ___currentWindTarget;
+                return false;
+            }
+
             ___currentGustTarget = ___currentWindTarget *
                 UnityEngine.Random.Range(1f, 1.33f);
             return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(Wind), "SetNewWindTarget")]
+    internal static class GentleSnowWindTargetPatch
+    {
+        [HarmonyPostfix]
+        [HarmonyPriority(Priority.Last)]
+        [HarmonyAfter(new[]
+        {
+            BetterStormPlugin.ChaoticWindGuid,
+            BetterStormPlugin.ClimateGuid
+        })]
+        private static void Postfix(ref Vector3 ___currentWindTarget)
+        {
+            if (!StormInfluenceService.TryGetCurrent(
+                    out StormInfluence influence) ||
+                !influence.IsGentleSnow)
+            {
+                return;
+            }
+
+            ___currentWindTarget = Vector3.ClampMagnitude(
+                Wind.currentBaseWind,
+                GentleSnowRules.MaximumWindTarget);
         }
     }
 

@@ -47,8 +47,7 @@ namespace BetterStorm
             ThunderPoolRegistry.Reset(controller);
 
             Vector3 target = player.position;
-            target.y = controller.transform.position.y;
-            controller.transform.position = target;
+            controller.SetDebugPosition(target);
             controller.PrepareDebugMove(true);
             WindOverrideState.NotifyDebugSummon(controller.Definition.Kind);
 
@@ -93,8 +92,7 @@ namespace BetterStorm
             ThunderPoolRegistry.Reset(controller);
 
             Vector3 target = player.position + away * outerEdge;
-            target.y = controller.transform.position.y;
-            controller.transform.position = target;
+            controller.SetDebugPosition(target);
             controller.PrepareDebugMove(false);
 
             Refresh(weatherStorms);

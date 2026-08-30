@@ -17,14 +17,13 @@ namespace BetterStorm
     {
         public const string PluginGuid = "DogEggz.BetterStorm";
         public const string PluginName = "Better Storm";
-        public const string PluginVersion = "1.0.9";
+        public const string PluginVersion = "1.1.0";
 
         public const string ChaoticWindGuid = "com.pete.sailwind.windconfigurator";
         public const string ClimateGuid = "com.raddude.climate";
         public const string BorderExpanderGuid = "com.nandbrew.borderexpander";
 
         private Harmony harmony;
-        private ConfigEntry<string> debugStormButtons;
         private readonly Dictionary<CustomStormId, ConfigEntry<bool>>
             stormEnabledEntries =
                 new Dictionary<CustomStormId, ConfigEntry<bool>>();
@@ -70,6 +69,7 @@ namespace BetterStorm
         {
             WindOverrideState.Tick();
             SandstormVisuals.Tick();
+            GentleSnowVisuals.Tick();
             SandstormDirt.Tick();
         }
 
@@ -77,10 +77,8 @@ namespace BetterStorm
         {
             Unsubscribe();
             WindOverrideState.RestoreImmediately();
-            SandstormVisuals.Shutdown();
-            SandstormDirt.Reset();
+            RuntimeEffectLifecycle.ShutdownTransientEffects();
             GlobalLightningSettings.RestoreSnapshots();
-            ThunderPoolRegistry.Shutdown();
             ModStormFactory.Shutdown();
             StormPositionPersistence.ResetAll();
 
@@ -111,8 +109,8 @@ namespace BetterStorm
 
             DisableSeasonLimits = Config.Bind(
                 "Climate Compatibility", "Disable Seasonal Storm Limits", false,
-                "Allow Hurricane, Sandstorm, and Dry Thunderstorm year-round, " +
-                "even while Climate Custom Winds is enabled.");
+                "Allow Hurricane, Sandstorm, Dry Thunderstorm, and Gentle " +
+                "Snow year-round, even while Climate Custom Winds is enabled.");
 
             FallbackBonusCap = BindSteppedSlider(
                 "Wind", "Storm + Ocean Bonus Cap",
@@ -133,7 +131,7 @@ namespace BetterStorm
                         Order = 10
                     }));
 
-            debugStormButtons = Config.Bind(
+            Config.Bind(
                 "Debug", "Custom Storm Controls", string.Empty,
                 new ConfigDescription(
                     "Always-available storm controls. Expand the compact panel to " +
@@ -196,8 +194,13 @@ namespace BetterStorm
 
             if (!IsEnabled(CustomStormId.Sandstorm))
             {
-                SandstormVisuals.Deactivate();
+                SandstormVisuals.DeactivateImmediately();
                 SandstormDirt.Reset();
+            }
+
+            if (!IsEnabled(CustomStormId.GentleSnow))
+            {
+                GentleSnowVisuals.DeactivateImmediately();
             }
 
             RefreshCurrentStorm();
@@ -249,6 +252,17 @@ namespace BetterStorm
             }
         }
 
+    }
+
+    internal static class RuntimeEffectLifecycle
+    {
+        internal static void ShutdownTransientEffects()
+        {
+            ThunderPoolRegistry.Shutdown();
+            SandstormVisuals.Shutdown();
+            GentleSnowVisuals.Shutdown();
+            SandstormDirt.Reset();
+        }
     }
 
     internal static class ChaoticWindCompatibility

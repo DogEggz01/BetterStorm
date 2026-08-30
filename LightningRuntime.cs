@@ -175,14 +175,6 @@ namespace BetterStorm
             }
         }
 
-        internal static void ResetAll()
-        {
-            foreach (ThunderEmitterPool pool in Pools.Values)
-            {
-                pool?.StopAll();
-            }
-        }
-
         internal static void Shutdown()
         {
             foreach (ThunderEmitterPool pool in Pools.Values)

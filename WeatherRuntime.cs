@@ -3,6 +3,54 @@ using UnityEngine;
 
 namespace BetterStorm
 {
+    internal static class CustomPrecipitationParticles
+    {
+        internal static void SetEmissionRate(
+            ParticleSystem particles,
+            float rate)
+        {
+            if (particles == null)
+            {
+                return;
+            }
+
+            ParticleSystem.EmissionModule emission = particles.emission;
+            emission.rateOverTime = rate;
+        }
+
+        internal static void Clear(ParticleSystem particles)
+        {
+            if (particles != null)
+            {
+                particles.Clear(true);
+            }
+        }
+
+        internal static void DisableInheritedComponents(GameObject clone)
+        {
+            Rain[] rainControllers = clone.GetComponentsInChildren<Rain>(true);
+            for (int i = 0; i < rainControllers.Length; i++)
+            {
+                rainControllers[i].enabled = false;
+            }
+
+            LitParticles[] lighting =
+                clone.GetComponentsInChildren<LitParticles>(true);
+            for (int i = 0; i < lighting.Length; i++)
+            {
+                lighting[i].enabled = false;
+            }
+
+            AudioSource[] audioSources =
+                clone.GetComponentsInChildren<AudioSource>(true);
+            for (int i = 0; i < audioSources.Length; i++)
+            {
+                audioSources[i].Stop();
+                audioSources[i].enabled = false;
+            }
+        }
+    }
+
     internal static class DryStormGameplay
     {
         internal static bool ShouldSuppressRain()
@@ -82,9 +130,9 @@ namespace BetterStorm
             EnsureInitialized(rain, outerRain);
             if (!active)
             {
-                ClearParticles(rain);
-                ClearParticles(outerRain);
-                ClearParticles(rainSplash);
+                CustomPrecipitationParticles.Clear(rain);
+                CustomPrecipitationParticles.Clear(outerRain);
+                CustomPrecipitationParticles.Clear(rainSplash);
             }
             active = true;
             SuppressVanillaRain(rain, outerRain, rainSplash);
@@ -94,15 +142,14 @@ namespace BetterStorm
             {
                 if (rainStageActive)
                 {
-                    SetEmissionRate(sandRain, 0f);
-                    ClearParticles(sandRain);
+                    CustomPrecipitationParticles.SetEmissionRate(sandRain, 0f);
                 }
                 rainStageActive = false;
                 return;
             }
 
             rainStageActive = true;
-            SetEmissionRate(
+            CustomPrecipitationParticles.SetEmissionRate(
                 sandRain,
                 SandParticleIntensity * rainStageLerp * EmissionRateMultiplier);
             RenderSettings.fogDensity = Mathf.Lerp(
@@ -161,19 +208,19 @@ namespace BetterStorm
         internal static void Deactivate()
         {
             rainStageActive = false;
-            if (!active)
-            {
-                return;
-            }
-
-            SetEmissionRate(sandRain, 0f);
-            ClearParticles(sandRain);
+            CustomPrecipitationParticles.SetEmissionRate(sandRain, 0f);
             active = false;
+        }
+
+        internal static void DeactivateImmediately()
+        {
+            Deactivate();
+            CustomPrecipitationParticles.Clear(sandRain);
         }
 
         internal static void Shutdown()
         {
-            Deactivate();
+            DeactivateImmediately();
             if (sandRain != null)
             {
                 UnityEngine.Object.Destroy(sandRain.gameObject);
@@ -257,26 +304,7 @@ namespace BetterStorm
             clone.name = name;
             clone.transform.localScale = source.transform.localScale;
 
-            Rain[] rainControllers = clone.GetComponentsInChildren<Rain>(true);
-            for (int i = 0; i < rainControllers.Length; i++)
-            {
-                rainControllers[i].enabled = false;
-            }
-
-            LitParticles[] lighting =
-                clone.GetComponentsInChildren<LitParticles>(true);
-            for (int i = 0; i < lighting.Length; i++)
-            {
-                lighting[i].enabled = false;
-            }
-
-            AudioSource[] audioSources =
-                clone.GetComponentsInChildren<AudioSource>(true);
-            for (int i = 0; i < audioSources.Length; i++)
-            {
-                audioSources[i].Stop();
-                audioSources[i].enabled = false;
-            }
+            CustomPrecipitationParticles.DisableInheritedComponents(clone);
 
             ParticleSystem particles = clone.GetComponent<ParticleSystem>();
             if (particles == null)
@@ -316,7 +344,7 @@ namespace BetterStorm
                 renderer.renderMode = ParticleSystemRenderMode.Billboard;
             }
 
-            SetEmissionRate(particles, 0f);
+            CustomPrecipitationParticles.SetEmissionRate(particles, 0f);
             ParticleSystem.EmissionModule emission = particles.emission;
             emission.enabled = true;
             particles.Clear(true);
@@ -489,29 +517,346 @@ namespace BetterStorm
             ParticleSystem outerRain,
             ParticleSystem rainSplash)
         {
-            SetEmissionRate(rain, 0f);
-            SetEmissionRate(outerRain, 0f);
-            SetEmissionRate(rainSplash, 0f);
+            CustomPrecipitationParticles.SetEmissionRate(rain, 0f);
+            CustomPrecipitationParticles.SetEmissionRate(outerRain, 0f);
+            CustomPrecipitationParticles.SetEmissionRate(rainSplash, 0f);
         }
+    }
 
-        internal static void SetEmissionRate(
-            ParticleSystem particles,
-            float rate)
+    internal static class GentleSnowVisuals
+    {
+        internal const float FallSpeed = 1.25f;
+        internal const float WindDriftMultiplier = 0.12f;
+        internal const float ParticleLifetime = 30f;
+        internal const float ParticleMinimumSize = 0.15f;
+        internal const float ParticleMaximumSize = 0.3f;
+        internal const int MaximumParticles = 20000;
+        internal const float SpawnHeight = 50f;
+        internal const float SpawnRadius = 150f;
+        internal const float ParticleAlpha = 0.25f;
+        internal const float GravityModifier = 0.02f;
+        private const float HorizontalNoiseStrength = 0.8f;
+        private const float VerticalNoiseStrength = 0.15f;
+        private const float NoiseFrequency = 0.22f;
+        private const float NoiseScrollSpeed = 0.2f;
+
+        private static readonly Color SnowColor = new Color(
+            251f / 255f,
+            253f / 255f,
+            1f,
+            1f);
+
+        private static ParticleSystem snowParticles;
+        private static bool active;
+
+        internal static void ApplyWeather(
+            StormInfluence influence,
+            ParticleSystem rain,
+            ParticleSystem outerRain,
+            ParticleSystem rainSplash)
         {
-            if (particles == null)
+            if (!influence.IsGentleSnow)
+            {
+                Deactivate();
+                return;
+            }
+
+            EnsureInitialized(outerRain);
+            if (!active)
+            {
+                CustomPrecipitationParticles.Clear(rain);
+                CustomPrecipitationParticles.Clear(outerRain);
+                CustomPrecipitationParticles.Clear(rainSplash);
+            }
+
+            active = true;
+            CustomPrecipitationParticles.SetEmissionRate(rain, 0f);
+            CustomPrecipitationParticles.SetEmissionRate(outerRain, 0f);
+            CustomPrecipitationParticles.SetEmissionRate(rainSplash, 0f);
+            GameState.rainIntensity = 0f;
+
+            if (snowParticles == null)
             {
                 return;
             }
 
-            ParticleSystem.EmissionModule emission = particles.emission;
-            emission.rateOverTime = rate;
+            float emissionRate = MaximumParticles / ParticleLifetime;
+            CustomPrecipitationParticles.SetEmissionRate(
+                snowParticles,
+                emissionRate * influence.WeatherLerp);
         }
 
-        private static void ClearParticles(ParticleSystem particles)
+        internal static void Tick()
         {
-            if (particles != null)
+            if (!active ||
+                !TryGetActiveInfluence(out StormInfluence unused) ||
+                snowParticles == null)
             {
-                particles.Clear(true);
+                return;
+            }
+
+            if (!UpdateEmitterPosition())
+            {
+                return;
+            }
+
+            ParticleSystem.VelocityOverLifetimeModule velocity =
+                snowParticles.velocityOverLifetime;
+            velocity.enabled = true;
+            velocity.space = ParticleSystemSimulationSpace.World;
+            velocity.x = Wind.currentWind.x * WindDriftMultiplier;
+            velocity.y = -FallSpeed;
+            velocity.z = Wind.currentWind.z * WindDriftMultiplier;
+
+        }
+
+        internal static void Deactivate()
+        {
+            CustomPrecipitationParticles.SetEmissionRate(snowParticles, 0f);
+            active = false;
+        }
+
+        internal static void DeactivateImmediately()
+        {
+            Deactivate();
+            CustomPrecipitationParticles.Clear(snowParticles);
+        }
+
+        internal static void Shutdown()
+        {
+            DeactivateImmediately();
+            if (snowParticles != null)
+            {
+                UnityEngine.Object.Destroy(snowParticles.gameObject);
+            }
+
+            snowParticles = null;
+        }
+
+        private static bool TryGetActiveInfluence(
+            out StormInfluence influence)
+        {
+            influence = default(StormInfluence);
+            return StormInfluenceService.TryGetCurrent(out influence) &&
+                influence.IsGentleSnow &&
+                BetterStormPlugin.Instance != null &&
+                BetterStormPlugin.Instance.IsEnabled(
+                    CustomStormId.GentleSnow);
+        }
+
+        private static void EnsureInitialized(ParticleSystem outerRain)
+        {
+            if (outerRain == null)
+            {
+                return;
+            }
+
+            Transform owner = Refs.shiftingWorld != null
+                ? Refs.shiftingWorld
+                : outerRain.transform.parent;
+            if (snowParticles != null)
+            {
+                if (snowParticles.transform.parent != owner)
+                {
+                    snowParticles.transform.SetParent(owner, true);
+                }
+                return;
+            }
+
+            GameObject clone = UnityEngine.Object.Instantiate(
+                outerRain.gameObject,
+                outerRain.transform.position,
+                outerRain.transform.rotation,
+                owner);
+            clone.name = "Better Storm Gentle Snow Particles";
+            clone.transform.rotation = Quaternion.identity;
+            clone.transform.localScale = Vector3.one;
+
+            CustomPrecipitationParticles.DisableInheritedComponents(clone);
+
+            snowParticles = clone.GetComponent<ParticleSystem>();
+            if (snowParticles == null)
+            {
+                UnityEngine.Object.Destroy(clone);
+                return;
+            }
+
+            ParticleSystem.MainModule main = snowParticles.main;
+            main.startLifetime = ParticleLifetime;
+            main.startSize = new ParticleSystem.MinMaxCurve(
+                ParticleMinimumSize,
+                ParticleMaximumSize);
+            main.startSpeed = 0f;
+            main.maxParticles = MaximumParticles;
+            main.gravityModifier = GravityModifier;
+            main.startColor = GetSnowColor();
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+
+            ParticleSystem.ShapeModule shape = snowParticles.shape;
+            shape.enabled = true;
+            shape.shapeType = ParticleSystemShapeType.Circle;
+            shape.radius = SpawnRadius;
+            shape.radiusThickness = 1f;
+            shape.arc = 360f;
+            shape.scale = Vector3.one;
+            shape.position = Vector3.zero;
+            shape.rotation = new Vector3(90f, 0f, 0f);
+
+            ParticleSystem.NoiseModule noise = snowParticles.noise;
+            noise.enabled = true;
+            noise.separateAxes = true;
+            noise.strengthX = HorizontalNoiseStrength;
+            noise.strengthY = VerticalNoiseStrength;
+            noise.strengthZ = HorizontalNoiseStrength;
+            noise.frequency = NoiseFrequency;
+            noise.scrollSpeed = NoiseScrollSpeed;
+            noise.damping = true;
+
+            ParticleSystemRenderer renderer =
+                clone.GetComponent<ParticleSystemRenderer>();
+            if (renderer != null)
+            {
+                renderer.renderMode = ParticleSystemRenderMode.Billboard;
+                InstallSnowMaterial(clone, renderer);
+            }
+
+            ParticleSystem.EmissionModule emission = snowParticles.emission;
+            emission.enabled = true;
+            CustomPrecipitationParticles.SetEmissionRate(snowParticles, 0f);
+            snowParticles.Clear(true);
+            UpdateEmitterPosition();
+            snowParticles.Play(true);
+        }
+
+        private static bool UpdateEmitterPosition()
+        {
+            if (snowParticles == null)
+            {
+                return false;
+            }
+
+            Camera camera = Camera.main;
+            if (camera == null)
+            {
+                return false;
+            }
+
+            Vector3 position = camera.transform.position;
+            position.y += SpawnHeight;
+            snowParticles.transform.position = position;
+            return true;
+        }
+
+        private static Color GetSnowColor()
+        {
+            Color color = SnowColor;
+            color.a = ParticleAlpha;
+            return color;
+        }
+
+        private static void InstallSnowMaterial(
+            GameObject owner,
+            ParticleSystemRenderer renderer)
+        {
+            Material source = renderer.sharedMaterial;
+            if (source == null)
+            {
+                return;
+            }
+
+            Material material = new Material(source)
+            {
+                name = "Better Storm Gentle Snow Material",
+                hideFlags = (HideFlags)52
+            };
+            Texture2D texture = CreateSnowTexture();
+            if (material.HasProperty("_MainTex"))
+            {
+                material.SetTexture("_MainTex", texture);
+            }
+            SetMaterialColorIfPresent(material, "_TintColor", Color.white);
+            SetMaterialColorIfPresent(material, "_Color", Color.white);
+            SetMaterialColorIfPresent(material, "_EmisColor", Color.white);
+            SetMaterialColorIfPresent(material, "_EmissionColor", Color.white);
+            renderer.sharedMaterial = material;
+
+            SnowParticleResourceOwner resources =
+                owner.AddComponent<SnowParticleResourceOwner>();
+            resources.Own(material, texture);
+        }
+
+        private static void SetMaterialColorIfPresent(
+            Material material,
+            string propertyName,
+            Color color)
+        {
+            if (material.HasProperty(propertyName))
+            {
+                material.SetColor(propertyName, color);
+            }
+        }
+
+        private static Texture2D CreateSnowTexture()
+        {
+            const int size = 32;
+            Texture2D texture = new Texture2D(
+                size,
+                size,
+                TextureFormat.RGBA32,
+                false)
+            {
+                name = "Better Storm Gentle Snow Texture",
+                hideFlags = (HideFlags)52,
+                filterMode = FilterMode.Bilinear,
+                wrapMode = TextureWrapMode.Clamp
+            };
+            Color32[] pixels = new Color32[size * size];
+            float center = (size - 1) * 0.5f;
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    float dx = (x - center) / center;
+                    float dy = (y - center) / center;
+                    float radius = Mathf.Sqrt(dx * dx + dy * dy);
+                    float alpha = 1f - Mathf.SmoothStep(0.35f, 1f, radius);
+                    pixels[y * size + x] = new Color32(
+                        255,
+                        255,
+                        255,
+                        (byte)(Mathf.Clamp01(alpha) * 255f));
+                }
+            }
+
+            texture.SetPixels32(pixels);
+            texture.Apply(false, true);
+            return texture;
+        }
+
+    }
+
+    internal sealed class SnowParticleResourceOwner : MonoBehaviour
+    {
+        private Material material;
+        private Texture2D texture;
+
+        internal void Own(Material ownedMaterial, Texture2D ownedTexture)
+        {
+            material = ownedMaterial;
+            texture = ownedTexture;
+        }
+
+        private void OnDestroy()
+        {
+            if (material != null)
+            {
+                UnityEngine.Object.Destroy(material);
+                material = null;
+            }
+            if (texture != null)
+            {
+                UnityEngine.Object.Destroy(texture);
+                texture = null;
             }
         }
     }
@@ -642,6 +987,33 @@ namespace BetterStorm
         }
     }
 
+    [HarmonyPatch(typeof(WeatherStorms), "ApplyStorm")]
+    internal static class GentleSnowClearWeatherPatch
+    {
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.Last)]
+        private static bool Prefix()
+        {
+            if (!StormInfluenceService.TryGetCurrent(
+                    out StormInfluence influence) ||
+                !influence.IsGentleSnow)
+            {
+                return true;
+            }
+
+            Weather weather = Weather.instance;
+            if (weather == null ||
+                weather.currentRegion == null ||
+                weather.currentRegion.clearWeather == null)
+            {
+                return true;
+            }
+
+            weather.ChangeWeather(weather.currentRegion.clearWeather);
+            return false;
+        }
+    }
+
     [HarmonyPatch(typeof(Weather), "ApplyWeather")]
     [HarmonyAfter(new[] { BetterStormPlugin.ClimateGuid })]
     internal static class CustomStormWeatherPatch
@@ -663,11 +1035,13 @@ namespace BetterStorm
                 influence.Definition == null)
             {
                 SandstormVisuals.Deactivate();
+                GentleSnowVisuals.Deactivate();
                 return;
             }
 
             if (influence.Definition.Kind == StormKind.Sandstorm)
             {
+                GentleSnowVisuals.Deactivate();
                 SandstormVisuals.ApplyWeather(
                     influence,
                     ___rain,
@@ -676,7 +1050,20 @@ namespace BetterStorm
                 return;
             }
 
+            if (influence.Definition.Kind == StormKind.GentleSnow)
+            {
+                SandstormVisuals.Deactivate();
+                GentleSnowVisuals.ApplyWeather(
+                    influence,
+                    ___rain,
+                    ___outerRain,
+                    ___rainSplash);
+                RenderSettings.fogDensity = 0f;
+                return;
+            }
+
             SandstormVisuals.Deactivate();
+            GentleSnowVisuals.Deactivate();
             if (influence.Definition.SuppressFog)
             {
                 RenderSettings.fogDensity = 0f;
@@ -684,9 +1071,9 @@ namespace BetterStorm
 
             if (influence.Definition.SuppressRainParticles)
             {
-                SandstormVisuals.SetEmissionRate(___rain, 0f);
-                SandstormVisuals.SetEmissionRate(___outerRain, 0f);
-                SandstormVisuals.SetEmissionRate(___rainSplash, 0f);
+                CustomPrecipitationParticles.SetEmissionRate(___rain, 0f);
+                CustomPrecipitationParticles.SetEmissionRate(___outerRain, 0f);
+                CustomPrecipitationParticles.SetEmissionRate(___rainSplash, 0f);
                 GameState.rainIntensity = 0f;
                 return;
             }
@@ -738,9 +1125,15 @@ namespace BetterStorm
                 weather.currentRegion.rainWeather.particles.rainDensity,
                 rainTarget,
                 stormBandLerp);
-            SandstormVisuals.SetEmissionRate(rain, rainIntensity * 75f);
-            SandstormVisuals.SetEmissionRate(outerRain, rainIntensity * 125f);
-            SandstormVisuals.SetEmissionRate(rainSplash, rainIntensity * 250f);
+            CustomPrecipitationParticles.SetEmissionRate(
+                rain,
+                rainIntensity * 75f);
+            CustomPrecipitationParticles.SetEmissionRate(
+                outerRain,
+                rainIntensity * 125f);
+            CustomPrecipitationParticles.SetEmissionRate(
+                rainSplash,
+                rainIntensity * 250f);
             GameState.rainIntensity = rainIntensity;
         }
     }

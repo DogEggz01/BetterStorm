@@ -11,6 +11,7 @@ namespace BetterStorm
         private ParticleSystem topParticles;
         private ParticleSystem bottomParticles;
         private float oneSecondTimer;
+        private bool latitudeParked;
 
         internal WanderingStorm Storm { get; private set; }
         internal StormDefinition Definition { get; private set; }
@@ -32,6 +33,11 @@ namespace BetterStorm
             StormAccess.ParticleDistance(Storm) = definition.ParticleDistance;
             topParticles = StormAccess.TopParticles(Storm);
             bottomParticles = StormAccess.BottomParticles(Storm);
+
+            if (definition.Kind == StormKind.GentleSnow)
+            {
+                HideInheritedStormClouds();
+            }
 
             if (definition.SupportsLightning)
             {
@@ -59,7 +65,8 @@ namespace BetterStorm
                 region != null &&
                 Definition.AllowsRegion(region.gameObject.name) &&
                 ClimateSeasonCompatibility.Allows(Definition) &&
-                region.stormCount >= Definition.Priority;
+                region.stormCount >= Definition.Priority &&
+                StormLatitudePlacement.IsAllowed(transform, Definition);
         }
 
         internal void CustomUpdate()
@@ -79,18 +86,22 @@ namespace BetterStorm
                 return;
             }
 
-            transform.Translate(
-                Wind.currentWind.normalized * Time.deltaTime * Definition.MoveSpeed,
-                Space.World);
-
-            Vector3 awayFromPlayer = transform.position - player.position;
-            awayFromPlayer.y = 0f;
-            if (awayFromPlayer.sqrMagnitude > 0.0001f)
+            if (!latitudeParked)
             {
                 transform.Translate(
-                    awayFromPlayer.normalized * Time.deltaTime *
-                    WeatherStorms.totemAttraction * Storm.totemMult,
+                    Wind.currentWind.normalized * Time.deltaTime *
+                    Definition.MoveSpeed,
                     Space.World);
+
+                Vector3 awayFromPlayer = transform.position - player.position;
+                awayFromPlayer.y = 0f;
+                if (awayFromPlayer.sqrMagnitude > 0.0001f)
+                {
+                    transform.Translate(
+                        awayFromPlayer.normalized * Time.deltaTime *
+                        WeatherStorms.totemAttraction * Storm.totemMult,
+                        Space.World);
+                }
             }
 
             oneSecondTimer -= Time.deltaTime;
@@ -100,25 +111,86 @@ namespace BetterStorm
             }
 
             oneSecondTimer = 1f;
-            Storm.active = ShouldBeActive();
-
             Vector3 horizontal = transform.position - player.position;
             horizontal.y = 0f;
             float distance = horizontal.magnitude;
 
             BetterStormPlugin plugin = BetterStormPlugin.Instance;
-            if (Storm.active &&
-                plugin != null &&
-                distance > plugin.RelocationDistance.Value)
+            float relocationDistance = plugin != null
+                ? plugin.RelocationDistance.Value
+                : 44000f;
+            bool activeBeforeRelocation = ShouldBeActive();
+            if (Definition.MinimumLatitude.HasValue)
+            {
+                UpdateLatitudeRelocation(
+                    activeBeforeRelocation,
+                    distance,
+                    relocationDistance);
+            }
+            else if (activeBeforeRelocation && distance > relocationDistance)
             {
                 transform.Translate(-horizontal * 1.75f, Space.World);
-                horizontal = transform.position - player.position;
-                horizontal.y = 0f;
-                distance = horizontal.magnitude;
             }
+
+            Storm.active = ShouldBeActive();
+            horizontal = transform.position - player.position;
+            horizontal.y = 0f;
+            distance = horizontal.magnitude;
 
             SetParticleEmission(
                 Storm.active && distance <= Definition.ParticleDistance);
+        }
+
+        internal void EnsureValidInitialPlacement()
+        {
+            if (player == null || !Definition.MinimumLatitude.HasValue)
+            {
+                return;
+            }
+
+            BetterStormPlugin plugin = BetterStormPlugin.Instance;
+            float relocationDistance = plugin != null
+                ? plugin.RelocationDistance.Value
+                : 44000f;
+            float playerLatitude = StormLatitudePlacement.GetLatitude(player);
+            float minimumLatitude = Definition.MinimumLatitude.Value;
+            if (GentleSnowRules.ShouldPark(
+                    playerLatitude,
+                    minimumLatitude,
+                    relocationDistance))
+            {
+                ParkAtMinimumLatitude(minimumLatitude);
+                return;
+            }
+
+            if (!StormLatitudePlacement.IsAllowed(transform, Definition))
+            {
+                RelocateAcrossPlayer(relocationDistance, minimumLatitude);
+            }
+        }
+
+        internal void SetDebugPosition(Vector3 target)
+        {
+            target.y = transform.position.y;
+            if (Definition.MinimumLatitude.HasValue)
+            {
+                float minimumLatitude = Definition.MinimumLatitude.Value;
+                target = StormLatitudePlacement.ClampTargetLatitude(
+                    target,
+                    transform,
+                    GentleSnowRules.GetParkingLatitude(minimumLatitude));
+                BetterStormPlugin plugin = BetterStormPlugin.Instance;
+                float relocationDistance = plugin != null
+                    ? plugin.RelocationDistance.Value
+                    : 44000f;
+                latitudeParked = player != null &&
+                    GentleSnowRules.ShouldPark(
+                        StormLatitudePlacement.GetLatitude(player),
+                        minimumLatitude,
+                        relocationDistance);
+            }
+
+            transform.position = target;
         }
 
         internal void SetModEnabled(bool enabled)
@@ -134,6 +206,7 @@ namespace BetterStorm
             }
 
             gameObject.SetActive(true);
+            EnsureValidInitialPlacement();
             Storm.active = ShouldBeActive();
             oneSecondTimer = 0f;
         }
@@ -232,8 +305,125 @@ namespace BetterStorm
 
         private void SetParticleEmission(bool enabled)
         {
+            if (Definition.Kind == StormKind.GentleSnow)
+            {
+                enabled = false;
+            }
+
             SetEmission(topParticles, enabled);
             SetEmission(bottomParticles, enabled);
+        }
+
+        private void UpdateLatitudeRelocation(
+            bool activeBeforeRelocation,
+            float distance,
+            float relocationDistance)
+        {
+            float minimumLatitude = Definition.MinimumLatitude.Value;
+            float playerLatitude = StormLatitudePlacement.GetLatitude(player);
+            bool shouldPark = GentleSnowRules.ShouldPark(
+                playerLatitude,
+                minimumLatitude,
+                relocationDistance);
+
+            if (latitudeParked)
+            {
+                if (shouldPark)
+                {
+                    return;
+                }
+
+                latitudeParked = false;
+                RelocateAcrossPlayer(relocationDistance, minimumLatitude);
+                return;
+            }
+
+            bool belowMinimum = !StormLatitudePlacement.IsAllowed(
+                transform,
+                Definition);
+            if (!belowMinimum &&
+                (!activeBeforeRelocation || distance <= relocationDistance))
+            {
+                return;
+            }
+
+            if (shouldPark)
+            {
+                ParkAtMinimumLatitude(minimumLatitude);
+            }
+            else
+            {
+                RelocateAcrossPlayer(relocationDistance, minimumLatitude);
+            }
+        }
+
+        private void ParkAtMinimumLatitude(float minimumLatitude)
+        {
+            Vector3 target = transform.position;
+            target.x = player.position.x;
+            target = StormLatitudePlacement.ClampTargetLatitude(
+                target,
+                transform,
+                GentleSnowRules.GetParkingLatitude(minimumLatitude));
+            transform.position = target;
+            latitudeParked = true;
+        }
+
+        private void RelocateAcrossPlayer(
+            float relocationDistance,
+            float minimumLatitude)
+        {
+            Vector3 horizontal = transform.position - player.position;
+            horizontal.y = 0f;
+            Vector3 direction = horizontal.sqrMagnitude > 0.0001f
+                ? -horizontal.normalized
+                : Vector3.forward;
+            Vector3 target = player.position +
+                direction * relocationDistance * 0.75f;
+            target.y = transform.position.y;
+            target = StormLatitudePlacement.ClampTargetLatitude(
+                target,
+                transform,
+                GentleSnowRules.GetParkingLatitude(minimumLatitude));
+
+            Vector3 constrainedOffset = target - player.position;
+            constrainedOffset.y = 0f;
+            if (constrainedOffset.magnitude > relocationDistance)
+            {
+                target.x = player.position.x;
+            }
+
+            transform.position = target;
+            latitudeParked = false;
+        }
+
+        private void HideInheritedStormClouds()
+        {
+            HideParticleSystem(topParticles);
+            HideParticleSystem(bottomParticles);
+        }
+
+        private static void HideParticleSystem(ParticleSystem particles)
+        {
+            if (particles == null)
+            {
+                return;
+            }
+
+            ParticleSystem.EmissionModule emission = particles.emission;
+            emission.enabled = false;
+            ParticleSystem.MainModule main = particles.main;
+            Color color = main.startColor.color;
+            color.a = 0f;
+            main.startColor = color;
+            particles.Clear(true);
+
+            ParticleSystemRenderer renderer =
+                particles.GetComponent<ParticleSystemRenderer>();
+            if (renderer != null)
+            {
+                renderer.enabled = false;
+            }
         }
 
         private static void SetEmission(ParticleSystem particles, bool enabled)
@@ -248,6 +438,45 @@ namespace BetterStorm
         }
     }
 
+    internal static class StormLatitudePlacement
+    {
+        internal static float GetLatitude(Transform target)
+        {
+            FloatingOriginManager origin = FloatingOriginManager.instance;
+            return origin != null
+                ? origin.GetGlobeCoords(target).z
+                : target.position.z / GentleSnowRules.WorldUnitsPerLatitude;
+        }
+
+        internal static bool IsAllowed(
+            Transform target,
+            StormDefinition definition)
+        {
+            return !definition.MinimumLatitude.HasValue ||
+                GentleSnowRules.IsLatitudeAllowed(
+                    GetLatitude(target),
+                    definition.MinimumLatitude.Value);
+        }
+
+        internal static Vector3 ClampTargetLatitude(
+            Vector3 target,
+            Transform reference,
+            float minimumLatitude)
+        {
+            float targetLatitude = GetLatitude(reference) +
+                (target.z - reference.position.z) /
+                GentleSnowRules.WorldUnitsPerLatitude;
+            if (targetLatitude >= minimumLatitude)
+            {
+                return target;
+            }
+
+            target.z += (minimumLatitude - targetLatitude) *
+                GentleSnowRules.WorldUnitsPerLatitude;
+            return target;
+        }
+    }
+
     internal static class ModStormFactory
     {
         private static readonly List<ModStormController> CustomStorms =
@@ -257,7 +486,6 @@ namespace BetterStorm
         private static WanderingStorm[] originalStorms;
         private static bool initialized;
 
-        internal static ModStormController Hurricane { get; private set; }
         internal static ModStormController Sandstorm { get; private set; }
 
         internal static void Initialize(WeatherStorms weatherStorms)
@@ -319,12 +547,9 @@ namespace BetterStorm
                     StormPositionPersistence.ApplyLoadedPosition(
                         definition.Id,
                         controller);
+                    controller.EnsureValidInitialPlacement();
 
-                    if (definition.Id == CustomStormId.Hurricane)
-                    {
-                        Hurricane = controller;
-                    }
-                    else if (definition.Id == CustomStormId.Sandstorm)
+                    if (definition.Id == CustomStormId.Sandstorm)
                     {
                         Sandstorm = controller;
                     }
@@ -345,7 +570,7 @@ namespace BetterStorm
                 GlobalLightningSettings.ApplyToLiveStorms();
                 BetterStormPlugin.Instance?.LogFeatureInfo(
                     "Initialized three Squalls, one Hurricane, one Dry " +
-                    "Thunderstorm, and one Sandstorm.");
+                    "Thunderstorm, one Sandstorm, and one Gentle Snow.");
             }
             catch (Exception exception)
             {
@@ -416,7 +641,6 @@ namespace BetterStorm
             }
 
             CustomStorms.Clear();
-            Hurricane = null;
             Sandstorm = null;
             originalStorms = null;
             owner = null;
@@ -449,9 +673,7 @@ namespace BetterStorm
         [HarmonyPostfix]
         private static void Postfix(WeatherStorms __instance)
         {
-            ThunderPoolRegistry.Shutdown();
-            SandstormVisuals.Shutdown();
-            SandstormDirt.Reset();
+            RuntimeEffectLifecycle.ShutdownTransientEffects();
             GlobalLightningSettings.RestoreSnapshots();
             ModStormFactory.Initialize(__instance);
         }
