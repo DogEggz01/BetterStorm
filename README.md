@@ -23,6 +23,8 @@
   - Only active in Aestrin and Chronos sea. Show up in Autumn/Winter if climate custom wind enable.
 - Add Hurricane: Huge storm and little bit slower than vanilla storm. You can hear lighting from far away. Very strong wind, heavier rain.
   - Only active in Emerald Archipelagos, Fire Fish Lagoon and Chronos Sea. Show up in Summer/Autumn if climate custom wind enable.
+- Add Gentle Snow: Small size slow moving "Storm". Clear weather, gentle wind, snow.
+  - Only active in north of 38N. Show up in Winter/Spring if Climate custom wind enable.
 - All regional special storm only spawn once. So it will be more rare.
 ## Bug fix
 - Fix thunder audio bug so it will play all 10 sound source. (Vanilla skip 2)
