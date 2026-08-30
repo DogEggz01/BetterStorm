@@ -581,9 +581,11 @@ namespace BetterStorm
             }
 
             float emissionRate = MaximumParticles / ParticleLifetime;
+            float emissionLerp = GentleSnowRules.GetSnowEmissionLerp(
+                influence.NormalizedDistance);
             CustomPrecipitationParticles.SetEmissionRate(
                 snowParticles,
-                emissionRate * influence.WeatherLerp);
+                emissionRate * emissionLerp);
         }
 
         internal static void Tick()

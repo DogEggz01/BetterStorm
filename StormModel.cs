@@ -517,6 +517,7 @@ namespace BetterStorm
         internal const float WorldUnitsPerLatitude = 9000f;
         internal const float MaximumWindTarget = 18f;
         internal const float FinalLerpSpeed = 0.25f;
+        internal const float FullSnowNormalizedDistance = 0.33f;
 
         internal static bool IsLatitudeAllowed(
             float latitude,
@@ -547,6 +548,14 @@ namespace BetterStorm
                        playerLatitude,
                        GetParkingLatitude(minimumLatitude)) >
                    relocationDistance;
+        }
+
+        internal static float GetSnowEmissionLerp(float normalizedDistance)
+        {
+            return Mathf.InverseLerp(
+                1f,
+                FullSnowNormalizedDistance,
+                normalizedDistance);
         }
     }
 
