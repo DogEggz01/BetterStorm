@@ -9,7 +9,7 @@
 - Increase Storm wind + ocean bonus limit to 40 (vanilla 20). Can be adjust by configurator.
 - Gust modifier will only make wind stronger in storm.
 - Gust last longer and wind speed change faster in storm.
-- Change storm selection logic so it will pick stronger storm for weather effect when multiple storm is nearby
+- Change storm selection logic so it will pick closer storm for weather effect when multiple storm is nearby
 - Add 4 custom storm. Have option to be compatible with Climate mod so it only show up in relevant season.
 - Add Storm relocate distance slider in Configurator. You can increase it to reduce the chance you met storm (since this mod add more storm).
 ## Custom storm
