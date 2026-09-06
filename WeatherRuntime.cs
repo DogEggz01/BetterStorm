@@ -83,7 +83,8 @@ namespace BetterStorm
         private const float VerticalVelocity = -4f;
         private const float StartLifetime = 2f;
         private const float SandParticleIntensity = 50f;
-        private const float SandParticleSize = 0.015f;
+        internal const float SandParticleMinimumSize = 0.01f;
+        internal const float SandParticleMaximumSize = 0.02f;
         private const float SandParticleSpawnRadius = 60f;
         private const float SandstormFogDensity = 0.03f;
         private const float NoiseStrength = 1.2f;
@@ -103,15 +104,23 @@ namespace BetterStorm
             0.1215686f,
             0.5f);
         private static readonly Color SandFogColor = new Color(
-            0.7647059f,
-            0.6f,
-            0.2823529f,
+            195f / 255f,
+            153f / 255f,
+            72f / 255f,
             1f);
-        private static readonly Color DistantStormColor = SandFogColor;
+        private static readonly Color SandFogNightColor = new Color(
+            56f / 255f,
+            47f / 255f,
+            36f / 255f,
+            1f);
 
         private static ParticleSystem sourceRain;
         private static ParticleSystem sourceOuterRain;
         private static ParticleSystem sandRain;
+        private static ParticleSystem distantStormClouds;
+        private static ParticleSystem overheadStormClouds;
+        private static SandstormCloudMaterialOwner distantStormCloudMaterial;
+        private static SandstormCloudMaterialOwner overheadStormCloudMaterial;
         private static bool active;
         private static bool rainStageActive;
 
@@ -158,12 +167,13 @@ namespace BetterStorm
                 rainStageLerp);
             RenderSettings.fogColor = Color.Lerp(
                 RenderSettings.fogColor,
-                SandFogColor,
+                GetCurrentSandstormColor(),
                 rainStageLerp);
         }
 
         internal static void Tick()
         {
+            RefreshStormCloudColors();
             if (!active ||
                 !rainStageActive ||
                 !TryGetActiveInfluence(out StormInfluence unused))
@@ -186,7 +196,7 @@ namespace BetterStorm
 
             ParticleSystem.MainModule main = fog.fogParticles.main;
             Color current = main.startColor.color;
-            Color target = SandFogColor;
+            Color target = GetCurrentSandstormColor();
             target.a = current.a;
             main.startColor = Color.Lerp(current, target, rainStageLerp);
         }
@@ -195,14 +205,25 @@ namespace BetterStorm
             ParticleSystem topParticles,
             ParticleSystem bottomParticles)
         {
-            ApplyStormCloudColor(
-                topParticles,
-                DistantStormColor,
+            distantStormClouds = topParticles;
+            overheadStormClouds = bottomParticles;
+            Color color = GetCurrentSandstormColor();
+            distantStormCloudMaterial = ApplyStormCloudColor(
+                distantStormClouds,
+                color,
                 DistantStormAlpha);
-            ApplyStormCloudColor(
-                bottomParticles,
-                DistantStormColor,
+            overheadStormCloudMaterial = ApplyStormCloudColor(
+                overheadStormClouds,
+                color,
                 OverheadStormAlpha);
+        }
+
+        internal static Color BlendSandstormColor(float nightLerp)
+        {
+            return Color.Lerp(
+                SandFogColor,
+                SandFogNightColor,
+                Mathf.Clamp01(nightLerp));
         }
 
         internal static void Deactivate()
@@ -316,7 +337,9 @@ namespace BetterStorm
             ParticleSystem.MainModule main = particles.main;
             main.startLifetime = StartLifetime;
             main.startSize3D = false;
-            main.startSize = SandParticleSize;
+            main.startSize = new ParticleSystem.MinMaxCurve(
+                SandParticleMinimumSize,
+                SandParticleMaximumSize);
             main.startSpeed = 0f;
             main.maxParticles = MaximumParticles;
             main.gravityModifier = 0f;
@@ -377,14 +400,14 @@ namespace BetterStorm
             }
         }
 
-        private static void ApplyStormCloudColor(
+        private static SandstormCloudMaterialOwner ApplyStormCloudColor(
             ParticleSystem particles,
             Color baseColor,
             float alpha)
         {
             if (particles == null)
             {
-                return;
+                return null;
             }
 
             Color color = baseColor;
@@ -395,7 +418,7 @@ namespace BetterStorm
             {
                 ParticleSystem.MainModule main = particles.main;
                 main.startColor = color;
-                return;
+                return null;
             }
 
             Material sourceMaterial = renderer.sharedMaterial;
@@ -412,14 +435,14 @@ namespace BetterStorm
                     owner.OwnedMaterial,
                     baseColor,
                     color.a);
-                return;
+                return owner;
             }
 
             if (sourceMaterial == null || tintShader == null)
             {
                 ParticleSystem.MainModule main = particles.main;
                 main.startColor = color;
-                return;
+                return null;
             }
 
             Texture mainTexture = sourceMaterial.HasProperty("_MainTex")
@@ -459,6 +482,7 @@ namespace BetterStorm
                     SandstormCloudMaterialOwner>();
             }
             owner.Own(tintMaterial);
+            return owner;
         }
 
         private static void ApplyTintAndAlpha(
@@ -468,18 +492,76 @@ namespace BetterStorm
             float alpha)
         {
             float opacity = Mathf.Clamp01(alpha);
-            Color materialTint = baseColor;
-            materialTint.r *= 0.5f;
-            materialTint.g *= 0.5f;
-            materialTint.b *= 0.5f;
-            materialTint.a = opacity * 0.5f;
-            material.SetColor("_TintColor", materialTint);
+            ApplyMaterialTint(material, baseColor, opacity);
 
             Color particleColor = Color.white;
             particleColor.a = opacity;
             ParticleSystem.MainModule main = particles.main;
             main.startColor = particleColor;
             ApplyColorToExistingParticles(particles, particleColor);
+        }
+
+        private static void RefreshStormCloudColors()
+        {
+            Color color = GetCurrentSandstormColor();
+            RefreshStormCloudColor(
+                distantStormClouds,
+                distantStormCloudMaterial,
+                color,
+                DistantStormAlpha);
+            RefreshStormCloudColor(
+                overheadStormClouds,
+                overheadStormCloudMaterial,
+                color,
+                OverheadStormAlpha);
+        }
+
+        private static void RefreshStormCloudColor(
+            ParticleSystem particles,
+            SandstormCloudMaterialOwner materialOwner,
+            Color baseColor,
+            float alpha)
+        {
+            if (particles == null)
+            {
+                return;
+            }
+
+            if (materialOwner != null &&
+                materialOwner.OwnedMaterial != null)
+            {
+                ApplyMaterialTint(
+                    materialOwner.OwnedMaterial,
+                    baseColor,
+                    alpha);
+                return;
+            }
+
+            Color particleColor = baseColor;
+            particleColor.a = Mathf.Clamp01(alpha);
+            ParticleSystem.MainModule main = particles.main;
+            main.startColor = particleColor;
+        }
+
+        private static void ApplyMaterialTint(
+            Material material,
+            Color baseColor,
+            float alpha)
+        {
+            Color materialTint = baseColor;
+            materialTint.r *= 0.5f;
+            materialTint.g *= 0.5f;
+            materialTint.b *= 0.5f;
+            materialTint.a = Mathf.Clamp01(alpha) * 0.5f;
+            material.SetColor("_TintColor", materialTint);
+        }
+
+        private static Color GetCurrentSandstormColor()
+        {
+            float nightLerp = Sun.sun != null
+                ? Sun.sun.GetNightLerp()
+                : 0f;
+            return BlendSandstormColor(nightLerp);
         }
 
         private static void ApplyColorToExistingParticles(
