@@ -51,6 +51,237 @@ namespace BetterStorm
         }
     }
 
+    internal static class RainEffects
+    {
+        internal const int RaisedSplashMaximumParticles = 20000;
+        internal const float SplashRadius = 70f;
+        internal const float VanillaSplashRadius = 35f;
+        internal const float VanillaSplashEmissionPerRainIntensity = 250f;
+        internal const float SplashEmissionPerRainIntensity =
+            VanillaSplashEmissionPerRainIntensity * SplashRadius *
+            SplashRadius / (VanillaSplashRadius * VanillaSplashRadius);
+        internal const float SquallMediumAudioMix = 1f;
+        internal const float SquallHeavyAudioMix = 1f;
+        internal const float HurricaneMediumAudioMix = 0.5f;
+        internal const float HurricaneHeavyAudioMix = 1f;
+
+        private static ParticleSystem trackedRainSplash;
+        private static int originalSplashMaximumParticles;
+        private static float originalSplashRadius;
+
+        internal static bool UsesAudioFix(StormKind kind)
+        {
+            return kind == StormKind.Squall || kind == StormKind.Hurricane;
+        }
+
+        internal static void ApplySplashSettings(ParticleSystem rainSplash)
+        {
+            if (rainSplash == null)
+            {
+                RestoreSplashSettings();
+                return;
+            }
+
+            if (trackedRainSplash != rainSplash)
+            {
+                RestoreSplashSettings();
+                trackedRainSplash = rainSplash;
+                ParticleSystem.MainModule originalMain = rainSplash.main;
+                originalSplashMaximumParticles = originalMain.maxParticles;
+                ParticleSystem.ShapeModule originalShape = rainSplash.shape;
+                originalSplashRadius = originalShape.radius;
+            }
+
+            ParticleSystem.MainModule main = rainSplash.main;
+            if (main.maxParticles != RaisedSplashMaximumParticles)
+            {
+                main.maxParticles = RaisedSplashMaximumParticles;
+            }
+            ParticleSystem.ShapeModule shape = rainSplash.shape;
+            if (!Mathf.Approximately(shape.radius, SplashRadius))
+            {
+                shape.radius = SplashRadius;
+            }
+        }
+
+        internal static void ScaleSplashEmissionForGlobalRadius(
+            ParticleSystem rainSplash)
+        {
+            if (rainSplash == null || originalSplashRadius <= 0f)
+            {
+                return;
+            }
+
+            float radiusRatio = SplashRadius /
+                originalSplashRadius;
+            ParticleSystem.EmissionModule emission = rainSplash.emission;
+            emission.rateOverTimeMultiplier *= radiusRatio * radiusRatio;
+        }
+
+        internal static void RestoreSplashSettings()
+        {
+            if (trackedRainSplash != null)
+            {
+                ParticleSystem.MainModule main = trackedRainSplash.main;
+                if (main.maxParticles == RaisedSplashMaximumParticles)
+                {
+                    main.maxParticles = originalSplashMaximumParticles;
+                }
+
+                ParticleSystem.ShapeModule shape = trackedRainSplash.shape;
+                if (Mathf.Approximately(shape.radius, SplashRadius))
+                {
+                    shape.radius = originalSplashRadius;
+                }
+            }
+
+            trackedRainSplash = null;
+            originalSplashMaximumParticles = 0;
+            originalSplashRadius = 0f;
+        }
+
+        internal static void ApplyRainGameplay()
+        {
+            if (TryGetActiveRainIntensity(out float rainIntensity))
+            {
+                GameState.rainIntensity = rainIntensity;
+            }
+        }
+
+        internal static void ApplyAudio(
+            AudioSource rainLight,
+            AudioSource rainMedium,
+            AudioSource rainHeavy,
+            float rainVolume)
+        {
+            if (!TryGetActiveInfluence(out StormInfluence influence) ||
+                !TryGetRainIntensity(influence, out float rainIntensity))
+            {
+                return;
+            }
+
+            float rainTarget = influence.Definition.RainTarget.Value;
+            SetAudioVolume(rainLight, 0f);
+            SetAudioVolume(
+                rainMedium,
+                GetLayerVolume(
+                    GetMediumAudioMix(influence.Kind),
+                    rainIntensity,
+                    rainTarget,
+                    rainVolume));
+            SetAudioVolume(
+                rainHeavy,
+                GetLayerVolume(
+                    GetHeavyAudioMix(influence.Kind),
+                    rainIntensity,
+                    rainTarget,
+                    rainVolume));
+        }
+
+        internal static float GetMediumAudioMix(StormKind kind)
+        {
+            return kind == StormKind.Squall
+                ? SquallMediumAudioMix
+                : kind == StormKind.Hurricane
+                    ? HurricaneMediumAudioMix
+                    : 0f;
+        }
+
+        internal static float GetHeavyAudioMix(StormKind kind)
+        {
+            return kind == StormKind.Squall
+                ? SquallHeavyAudioMix
+                : kind == StormKind.Hurricane
+                    ? HurricaneHeavyAudioMix
+                    : 0f;
+        }
+
+        internal static float GetLayerVolume(
+            float layerMix,
+            float rainIntensity,
+            float rainTarget,
+            float rainVolume)
+        {
+            if (rainTarget <= 0f)
+            {
+                return 0f;
+            }
+
+            float rainStrength = Mathf.Clamp01(rainIntensity / rainTarget);
+            return Mathf.Clamp01(layerMix) * rainStrength *
+                Mathf.Max(0f, rainVolume);
+        }
+
+        private static bool TryGetActiveInfluence(
+            out StormInfluence influence)
+        {
+            influence = default(StormInfluence);
+            return StormInfluenceService.TryGetCurrent(out influence) &&
+                UsesAudioFix(influence.Kind) &&
+                influence.Definition != null &&
+                influence.Definition.RainTarget.HasValue &&
+                BetterStormPlugin.Instance != null &&
+                BetterStormPlugin.Instance.IsEnabled(influence.Definition.Id);
+        }
+
+        private static bool TryGetActiveRainIntensity(
+            out float rainIntensity)
+        {
+            rainIntensity = 0f;
+            return TryGetActiveInfluence(out StormInfluence influence) &&
+                TryGetRainIntensity(influence, out rainIntensity);
+        }
+
+        internal static bool TryGetRainIntensity(
+            StormInfluence influence,
+            out float rainIntensity)
+        {
+            rainIntensity = 0f;
+            WeatherStorms weatherStorms = WeatherStorms.instance;
+            Weather weather = Weather.instance;
+            if (weatherStorms == null ||
+                weather == null ||
+                weather.currentRegion == null ||
+                weather.currentRegion.rainWeather == null ||
+                weather.currentRegion.rainWeather.particles == null ||
+                influence.Definition == null ||
+                !influence.Definition.RainTarget.HasValue)
+            {
+                return false;
+            }
+
+            float rainBorder = StormAccess.RainBorder(weatherStorms);
+            float normalizedDistance = 1f - influence.WeatherLerp;
+            if (rainBorder <= 0f || normalizedDistance > rainBorder)
+            {
+                return false;
+            }
+
+            float stormBandLerp = Mathf.InverseLerp(
+                rainBorder,
+                0f,
+                normalizedDistance);
+            rainIntensity = Mathf.Lerp(
+                weather.currentRegion.rainWeather.particles.rainDensity,
+                influence.Definition.RainTarget.Value,
+                stormBandLerp);
+            rainIntensity = Mathf.Max(0f, rainIntensity);
+            return true;
+        }
+
+        private static void SetAudioVolume(
+            AudioSource source,
+            float volume)
+        {
+            if (source == null)
+            {
+                return;
+            }
+
+            source.volume = volume;
+        }
+    }
+
     internal static class DryStormGameplay
     {
         internal static bool ShouldSuppressRain()
@@ -254,13 +485,18 @@ namespace BetterStorm
         private static bool TryGetActiveInfluence(out StormInfluence influence)
         {
             influence = default(StormInfluence);
-            return StormInfluenceService.TryGetCurrent(out influence) &&
-                influence.IsSandstorm &&
-                BetterStormPlugin.Instance != null &&
-                BetterStormPlugin.Instance.IsEnabled(CustomStormId.Sandstorm) &&
-                GameplayRegionResolver.GetCurrentRegion() != null &&
-                GameplayRegionResolver.GetCurrentRegion().gameObject.name ==
-                    "Region Al'ankh";
+            BetterStormPlugin plugin = BetterStormPlugin.Instance;
+            if (!StormInfluenceService.TryGetCurrent(out influence) ||
+                !influence.IsSandstorm ||
+                plugin == null ||
+                !plugin.IsEnabled(CustomStormId.Sandstorm))
+            {
+                return false;
+            }
+
+            Region region = GameplayRegionResolver.GetCurrentRegion();
+            return region != null &&
+                region.gameObject.name == "Region Al'ankh";
         }
 
         private static bool TryGetRainStageLerp(
@@ -1103,7 +1339,7 @@ namespace BetterStorm
 
     [HarmonyPatch(typeof(Weather), "ApplyWeather")]
     [HarmonyAfter(new[] { BetterStormPlugin.ClimateGuid })]
-    internal static class CustomStormWeatherPatch
+    internal static class WeatherEffectsPatch
     {
         [HarmonyPostfix]
         [HarmonyPriority(Priority.Last)]
@@ -1116,6 +1352,10 @@ namespace BetterStorm
             {
                 return;
             }
+
+            RainEffects.ApplySplashSettings(___rainSplash);
+            RainEffects.ScaleSplashEmissionForGlobalRadius(
+                ___rainSplash);
 
             if (!StormInfluenceService.TryGetCurrent(
                     out StormInfluence influence) ||
@@ -1169,49 +1409,34 @@ namespace BetterStorm
             {
                 ApplyRainTarget(
                     influence,
-                    influence.Definition.RainTarget.Value,
                     ___rain,
                     ___outerRain,
                     ___rainSplash);
+                return;
             }
+
         }
 
         private static void ApplyRainTarget(
             StormInfluence influence,
-            float rainTarget,
             ParticleSystem rain,
             ParticleSystem outerRain,
             ParticleSystem rainSplash)
         {
-            WeatherStorms weatherStorms = WeatherStorms.instance;
-            Weather weather = Weather.instance;
-            if (weatherStorms == null ||
-                weather == null ||
-                weather.currentRegion == null ||
-                weather.currentRegion.rainWeather == null ||
-                weather.currentRegion.rainWeather.particles == null ||
-                rain == null ||
+            if (rain == null ||
                 outerRain == null ||
                 rainSplash == null)
             {
                 return;
             }
 
-            float rainBorder = StormAccess.RainBorder(weatherStorms);
-            float normalizedDistance = 1f - influence.WeatherLerp;
-            if (normalizedDistance > rainBorder)
+            if (!RainEffects.TryGetRainIntensity(
+                    influence,
+                    out float rainIntensity))
             {
                 return;
             }
 
-            float stormBandLerp = Mathf.InverseLerp(
-                rainBorder,
-                0f,
-                normalizedDistance);
-            float rainIntensity = Mathf.Lerp(
-                weather.currentRegion.rainWeather.particles.rainDensity,
-                rainTarget,
-                stormBandLerp);
             CustomPrecipitationParticles.SetEmissionRate(
                 rain,
                 rainIntensity * 75f);
@@ -1220,13 +1445,15 @@ namespace BetterStorm
                 rainIntensity * 125f);
             CustomPrecipitationParticles.SetEmissionRate(
                 rainSplash,
-                rainIntensity * 250f);
+                rainIntensity *
+                    RainEffects.SplashEmissionPerRainIntensity);
             GameState.rainIntensity = rainIntensity;
         }
     }
 
     [HarmonyPatch(typeof(Rain), "Update")]
-    internal static class DryStormRainAudioPatch
+    [HarmonyAfter(new[] { BetterStormPlugin.ClimateGuid })]
+    internal static class CustomStormRainAudioPatch
     {
         [HarmonyPrefix]
         [HarmonyPriority(Priority.Last)]
@@ -1234,16 +1461,32 @@ namespace BetterStorm
         {
             DryStormGameplay.SuppressRainGameplay();
         }
+
+        [HarmonyPostfix]
+        [HarmonyPriority(Priority.Last)]
+        private static void Postfix(
+            AudioSource ___rainLight,
+            AudioSource ___rainMedium,
+            AudioSource ___rainHeavy,
+            float ___rainVolume)
+        {
+            RainEffects.ApplyAudio(
+                ___rainLight,
+                ___rainMedium,
+                ___rainHeavy,
+                ___rainVolume);
+        }
     }
 
     [HarmonyPatch(typeof(BoatDamage), "Update")]
-    internal static class DryStormShipWaterPatch
+    internal static class CustomStormShipWaterPatch
     {
         [HarmonyPrefix]
         [HarmonyPriority(Priority.Last)]
         private static void Prefix()
         {
             DryStormGameplay.SuppressRainGameplay();
+            RainEffects.ApplyRainGameplay();
         }
     }
 

@@ -51,6 +51,12 @@ namespace BetterStorm
             controller.PrepareDebugMove(true);
             WindOverrideState.NotifyDebugSummon(controller.Definition.Kind);
 
+            // Debug Summon is an explicit override. Make the requested storm
+            // current before selection runs so the normal 66% retention rule
+            // cannot keep a previously selected storm instead.
+            StormAccess.CurrentStorm(weatherStorms) = controller.Storm;
+            WeatherStorms.currentStormDistance = 0f;
+
             Refresh(weatherStorms);
             BetterStormPlugin.Instance.LogFeatureInfo(
                 "Debug summoned " + controller.Definition.Name + ".");

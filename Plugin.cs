@@ -17,7 +17,7 @@ namespace BetterStorm
     {
         public const string PluginGuid = "DogEggz.BetterStorm";
         public const string PluginName = "Better Storm";
-        public const string PluginVersion = "1.1.3";
+        public const string PluginVersion = "1.1.4";
 
         public const string ChaoticWindGuid = "com.pete.sailwind.windconfigurator";
         public const string ClimateGuid = "com.raddude.climate";
@@ -259,6 +259,7 @@ namespace BetterStorm
         internal static void ShutdownTransientEffects()
         {
             ThunderPoolRegistry.Shutdown();
+            RainEffects.RestoreSplashSettings();
             SandstormVisuals.Shutdown();
             GentleSnowVisuals.Shutdown();
             SandstormDirt.Reset();

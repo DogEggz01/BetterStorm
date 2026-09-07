@@ -380,6 +380,8 @@ namespace BetterStorm
             AccessTools.FieldRefAccess<WeatherStorms, WanderingStorm[]>("storms");
         internal static readonly AccessTools.FieldRef<WeatherStorms, float> CurrentStormRange =
             AccessTools.FieldRefAccess<WeatherStorms, float>("currentStormRange");
+        internal static readonly AccessTools.FieldRef<WeatherStorms, WanderingStorm> CurrentStorm =
+            AccessTools.FieldRefAccess<WeatherStorms, WanderingStorm>("currentStorm");
         internal static readonly AccessTools.FieldRef<WeatherStorms, float> RainBorder =
             AccessTools.FieldRefAccess<WeatherStorms, float>("rainBorder");
 
