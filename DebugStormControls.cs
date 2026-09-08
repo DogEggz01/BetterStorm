@@ -25,12 +25,96 @@ namespace BetterStorm
             }
 
             GUILayout.BeginVertical(GUILayout.Width(DrawerWidth));
+            DrawVanillaControls();
             for (int i = 0; i < StormCatalog.Custom.Length; i++)
             {
                 StormDefinition definition = StormCatalog.Custom[i];
                 DrawControls(definition.Name, definition.Id);
             }
             GUILayout.EndVertical();
+        }
+
+        private static void DrawVanillaControls()
+        {
+            bool previousEnabled = GUI.enabled;
+            GUI.enabled = previousEnabled && TryGetVanillaContext(
+                out WanderingStorm unusedStorm, out WeatherStorms unusedWeather,
+                out Transform unusedPlayer);
+            GUILayout.Space(4f);
+            GUILayout.Label("Vanilla Storm (priority 1)", GUILayout.Width(DrawerWidth));
+            if (GUILayout.Button("Summon", GUILayout.Width(DrawerWidth)))
+                MoveVanillaStorm(true);
+            if (GUILayout.Button("Push to outer edge", GUILayout.Width(DrawerWidth)))
+                MoveVanillaStorm(false);
+            GUI.enabled = previousEnabled;
+        }
+
+        internal static bool MoveVanillaStorm(bool summon)
+        {
+            if (!TryGetVanillaContext(out WanderingStorm storm,
+                    out WeatherStorms weatherStorms, out Transform player))
+                return false;
+            float outerEdge = storm.GetRadius() +
+                StormInfluenceService.GetWeatherRange(weatherStorms, null);
+            Vector3 away = storm.transform.position - player.position;
+            away.y = 0f;
+            if (away.sqrMagnitude < 0.0001f)
+            {
+                away = player.forward;
+                away.y = 0f;
+            }
+            away = away.sqrMagnitude < 0.0001f ? Vector3.forward : away.normalized;
+            Vector3 target = summon ? player.position : player.position + away * outerEdge;
+            target.y = storm.transform.position.y;
+            storm.transform.position = target;
+            storm.active = true;
+            ParticleSystem bottom = StormAccess.BottomParticles(storm);
+            if (bottom != null)
+            {
+                ParticleSystem.EmissionModule emission = bottom.emission;
+                emission.enabled = Vector3.Distance(target, player.position) <=
+                    StormAccess.ParticleDistance(storm);
+            }
+            if (summon)
+            {
+                WindOverrideState.NotifyDebugSummon(StormKind.Vanilla);
+                StormAccess.CurrentStorm(weatherStorms) = storm;
+                WeatherStorms.currentStormDistance = Vector3.Distance(target, player.position);
+                WanderingStormLightning lightning = storm.GetComponent<WanderingStormLightning>();
+                if (lightning != null) StormAccess.LightningCooldown(lightning) = 0f;
+            }
+            Refresh(weatherStorms);
+            BetterStormPlugin.Instance.LogFeatureInfo(summon
+                ? "Debug summoned vanilla priority-1 storm."
+                : "Debug pushed vanilla priority-1 storm to outer edge " + outerEdge.ToString("0.0") + ".");
+            return true;
+        }
+
+        private static bool TryGetVanillaContext(out WanderingStorm storm,
+            out WeatherStorms weatherStorms, out Transform player)
+        {
+            storm = null;
+            weatherStorms = WeatherStorms.instance;
+            Camera camera = Camera.main;
+            player = camera != null ? camera.transform : null;
+            Region region = GameplayRegionResolver.GetCurrentRegion();
+            if (BetterStormPlugin.Instance == null || !GameState.playing ||
+                weatherStorms == null || player == null || region == null || region.stormCount < 1)
+                return false;
+            WanderingStorm[] storms = StormAccess.Storms(weatherStorms);
+            if (storms == null) return false;
+            for (int i = 0; i < storms.Length; i++)
+            {
+                WanderingStorm candidate = storms[i];
+                if (candidate != null && candidate.isActiveAndEnabled &&
+                    StormAccess.Priority(candidate) == 1 &&
+                    candidate.GetComponent<ModStormController>() == null)
+                {
+                    storm = candidate;
+                    return true;
+                }
+            }
+            return false;
         }
 
         internal static bool Summon(CustomStormId id)

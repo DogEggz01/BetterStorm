@@ -17,7 +17,7 @@ namespace BetterStorm
     {
         public const string PluginGuid = "DogEggz.BetterStorm";
         public const string PluginName = "Better Storm";
-        public const string PluginVersion = "1.1.4";
+        public const string PluginVersion = "1.1.5";
 
         public const string ChaoticWindGuid = "com.pete.sailwind.windconfigurator";
         public const string ClimateGuid = "com.raddude.climate";
@@ -131,11 +131,14 @@ namespace BetterStorm
                         Order = 10
                     }));
 
+
+
             Config.Bind(
                 "Debug", "Custom Storm Controls", string.Empty,
                 new ConfigDescription(
                     "Always-available storm controls. Expand the compact panel to " +
-                    "summon or push a custom storm to its outer weather edge.",
+                    "summon or push the priority-1 vanilla storm or a custom storm " +
+                    "to its outer weather edge.",
                     null,
                     new ConfigurationManagerAttributes
                     {
@@ -163,6 +166,30 @@ namespace BetterStorm
                 new ConfigDescription(
                     description,
                     new SteppedAcceptableValueRange(minimum, maximum, step),
+                    new ConfigurationManagerAttributes
+                    {
+                        ShowRangeAsPercent = false,
+                        Order = order
+                    }));
+        }
+
+        private ConfigEntry<int> BindSteppedIntSlider(
+            string section,
+            string key,
+            int defaultValue,
+            int minimum,
+            int maximum,
+            int step,
+            string description,
+            int order)
+        {
+            return Config.Bind(
+                section,
+                key,
+                defaultValue,
+                new ConfigDescription(
+                    description,
+                    new SteppedAcceptableIntRange(minimum, maximum, step),
                     new ConfigurationManagerAttributes
                     {
                         ShowRangeAsPercent = false,
@@ -259,9 +286,11 @@ namespace BetterStorm
         internal static void ShutdownTransientEffects()
         {
             ThunderPoolRegistry.Shutdown();
-            RainEffects.RestoreSplashSettings();
+            StormRainVisuals.Shutdown();
+            RainEffects.RestoreRainSettings();
             SandstormVisuals.Shutdown();
             GentleSnowVisuals.Shutdown();
+            IndoorPrecipitationExclusion.ResetCaches();
             SandstormDirt.Reset();
         }
     }

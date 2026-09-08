@@ -44,4 +44,29 @@ namespace BetterStorm
             return Mathf.Approximately(floatValue, (float)Clamp(floatValue));
         }
     }
+
+    internal sealed class SteppedAcceptableIntRange : AcceptableValueRange<int>
+    {
+        private readonly int step;
+
+        internal SteppedAcceptableIntRange(int minimum, int maximum, int step)
+            : base(minimum, maximum)
+        {
+            this.step = step;
+        }
+
+        public override object Clamp(object value)
+        {
+            int clamped = (int)base.Clamp(value);
+            int snapped = MinValue +
+                (int)Mathf.Floor(
+                    (clamped - MinValue) / (float)step + 0.5f) * step;
+            return Mathf.Clamp(snapped, MinValue, MaxValue);
+        }
+
+        public override bool IsValid(object value)
+        {
+            return value is int intValue && intValue == (int)Clamp(intValue);
+        }
+    }
 }
