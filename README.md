@@ -23,7 +23,7 @@
 ### High pressure
 - Weak wind area. No cloud, sea will be glass.
 - Don't happen above 37N, only 1 copy so it's rare
-- Show up in all area and all season
+- Show up in all area and all season, it's not visible on sea (no storm cloud)(duh)
 ### Magnetic Mist
 - A light rain mist, the closer you're to the core, the thicker the mist and the cloud.
 - Mist don't have special wind modifier, it will be same like you're not in storm.
@@ -36,7 +36,7 @@
 - Sun totem can push the mist away temporally, it will come back to you after 6 in game hour.
 - Magnetic mist only take effect when you're away from land atleast 9km (1 degree of lat/long)
   - It will also stop following you and start the 168 in game hour cooldown
-- Show up in all area and all season
+- Show up in all area and all season, it's not visible on sea (no storm cloud)
 ## Regional special storm
 - All regional special storm only spawn once. So it will be more rare.
 - There is a toggle option to let all storm active regardless of season.
