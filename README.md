@@ -17,7 +17,8 @@
 - Add Storm relocate distance slider in Configurator. You can increase it to reduce the chance you met storm (since this mod add more storm).
 ## Custom storm
 - All custom storm can be toggle off seperately.
-### Add 3 squalls: Very fast-moving super heavy rain storm. Very small area. Have different wind strength.
+### squalls
+- Very fast-moving super heavy rain storm. Very small area. There is 3 quall and each has different wind strength.
 - These show up in all area and all season.
 ### Doldrum
 - Weak wind area. When happen in Al'ankh and Aestrin, it present like high pressure system, no cloud, very little wind.
