@@ -34,7 +34,7 @@
 - When you're affect by other storm, if the mist comes close it will still affect your navigation tools
 - Sun totem can push the mist away temporally, it will come back to you after 6 in game hour.
 - Magnetic mist only take effect when you're away from land atleast 9km (1 degree of lat/long)
-  - It will also stop following you and start the 120 hour cooldown
+  - It will also stop following you and start the 168 in game hour cooldown
 ## Regional special storm
 - All regional special storm only spawn once. So it will be more rare.
 - There is a toggle option to let all storm active regardless of season.
