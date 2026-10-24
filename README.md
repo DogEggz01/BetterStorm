@@ -20,10 +20,9 @@
 ### squalls
 - Very fast-moving super heavy rain storm. Very small area. There is 3 quall and each has different wind strength.
 - These show up in all area and all season.
-### Doldrum
-- Weak wind area. When happen in Al'ankh and Aestrin, it present like high pressure system, no cloud, very little wind.
-- When in Emerald and FFL area, it will still have it's cloud, but still little wind.
-- Don't happen above 36N, only 1 copy so it's rare
+### High pressure
+- Weak wind area. No cloud, sea will be glass.
+- Don't happen above 37N, only 1 copy so it's rare
 ### Magnetic Mist
 - A light rain mist, the closer you're to the core, the thicker the mist and the cloud.
 - As cloud getting thicker, it will block all the sunlight so you cannot use suncompass or chronocompass
