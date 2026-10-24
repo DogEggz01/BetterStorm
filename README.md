@@ -31,7 +31,7 @@
   - You won't be able to see star and moon to do celestial navigation in the night.
 - As you getting closer to core, your compass and chronometer will start swing around, until fully unusable when at core radius.
 - Once the mist find you, it will follow you for 48 in game hour, then it will continued it's way
-- There will be a 120 hour cooldown that it won't follow you again, but you can still sail into it.
+- There will be a 168 hour cooldown that it won't follow you again, but you can still sail into it.
 - When you're affect by other storm, if the mist comes close it will still affect your navigation tools
 - Sun totem can push the mist away temporally, it will come back to you after 6 in game hour.
 - Magnetic mist only take effect when you're away from land atleast 9km (1 degree of lat/long)
