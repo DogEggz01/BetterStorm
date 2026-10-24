@@ -35,14 +35,19 @@
 - Magnetic mist only take effect when you're away from land atleast 9km (1 degree of lat/long)
   - It will also stop following you and start the 120 hour cooldown
 ## Regional special storm
-### Add Sandstorm: Fast moving pile of sand but smaller radius. Bad visibility, everything yellow, your boat get dirty fast.
+### Sandstorm
+- Fast moving pile of sand but smaller radius. Bad visibility, everything yellow, your boat get dirty fast.
 - Only active in Al'Ankh Sea. Show up in Spring/Summer if climate custom wind enable.
-### Add Dry Thunderstorm: Slow moving smaller storm, no rain, good visibility but a lot of bright lighting. Strong wind.
+### Dry Thunderstorm
+- Slow moving smaller storm, no rain, good visibility but a lot of bright lighting. Strong wind.
 - Only active in Aestrin and Chronos sea. Show up in Autumn/Winter if climate custom wind enable.
-### Add Hurricane: Huge storm and little bit slower than vanilla storm. You can hear lighting from far away. Very strong wind, heavier rain.
+### Add Hurricane
+- Huge storm and little bit slower than vanilla storm. You can hear lighting from far away. Very strong wind, heavier rain.
 - Only active in Emerald Archipelagos, Fire Fish Lagoon and Chronos Sea. Show up in Summer/Autumn if climate custom wind enable.
-### Add Gentle Snow: Small size slow moving "Storm". Clear weather, gentle wind, snow.
+### Add Gentle Snow
+- Small size slow moving "Storm". Clear weather, gentle wind, snow.
 - Only active in north of 38N. Show up in Winter/Spring if Climate custom wind enable.
+
 - All regional special storm only spawn once. So it will be more rare.
 - There is a toggle option to let all storm active regardless of season.
 ## Bug fix
