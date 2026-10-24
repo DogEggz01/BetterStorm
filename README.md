@@ -26,6 +26,7 @@
 - Show up in all area and all season
 ### Magnetic Mist
 - A light rain mist, the closer you're to the core, the thicker the mist and the cloud.
+- Mist don't have special wind modifier, it will be same like you're not in storm.
 - As cloud getting thicker, it will block all the sunlight so you cannot use suncompass or chronocompass
   - You won't be able to see star and moon to do celestial navigation in the night.
 - As you getting closer to core, your compass and chronometer will start swing around, until fully unusable when at core radius.
