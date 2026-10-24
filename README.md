@@ -25,7 +25,7 @@
 - Don't happen above 37N, only 1 copy so it's rare
 - Show up in all area and all season, it's not visible on sea (no storm cloud)(duh)
 ### Magnetic Mist
-- A light rain mist, the closer you're to the core, the thicker the mist and the cloud.
+- A light rain mist, the closer you're to the core, the thicker the mist and the cloud. Only 1 copy.
 - Mist don't have special wind modifier, it will be same like you're not in storm.
 - As cloud getting thicker, it will block all the sunlight so you cannot use suncompass or chronocompass
   - You won't be able to see star and moon to do celestial navigation in the night.
@@ -35,7 +35,8 @@
 - When you're affect by other storm, if the mist comes close it will still affect your navigation tools
 - Sun totem can push the mist away temporally, it will come back to you after 6 in game hour.
 - Magnetic mist only take effect when you're away from land atleast 9km (1 degree of lat/long)
-  - It will also stop following you and start the 168 in game hour cooldown
+- Once go close to land, fog will disspiate and instrument will return normal soon
+  - It will also stop following you and start the 168 hour cooldown if you go close to land
 - Show up in all area and all season, it's not visible on sea (no storm cloud)
 ## Regional special storm
 - All regional special storm only spawn once. So it will be more rare.
