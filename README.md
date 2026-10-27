@@ -25,19 +25,19 @@
 - Don't happen above 37N, only 1 copy so it's rare
 - Show up in all area and all season, it's not visible on sea (no storm cloud)(duh)
 ### Magnetic Mist
-- A light rain mist, the closer you're to the core, the thicker the mist and the cloud. Only 1 copy.
+- A light rain mist with aurora, the closer you're to the core, the thicker the mist and the cloud. Only 1 copy.
 - Mist don't have special wind modifier, it will be same like you're not in storm.
 - As cloud getting thicker, it will block all the sunlight so you cannot use suncompass or chronocompass
   - You won't be able to see star and moon to do celestial navigation in the night.
 - As you getting closer to core, your compass and chronometer will start swing around, until fully unusable when at core radius.
-- Once the mist find you, it will follow you for 48 in game hour, then it will continued it's way
+- If you enter mist's core area (where aurora is), it will follow you for 48 in game hour(can be changed in configurator), then it will continued it's way
 - There will be a 168 hour cooldown that it won't follow you again, but you can still sail into it.
 - When you're affect by other storm, if the mist comes close it will still affect your navigation tools
 - Sun totem can push the mist away temporally, it will come back to you after 6 in game hour.
 - Magnetic mist only take effect when you're away from land atleast 9km (1 degree of lat/long)
 - Once go close to land, fog will disspiate and instrument will return normal soon
   - It will also stop following you and start the 168 hour cooldown if you go close to land
-- Show up in all area and all season, it's not visible on sea (no storm cloud)
+- Show up in all area and all season
 ## Regional special storm
 - All regional special storm only spawn once. So it will be more rare.
 - There is a toggle option to let all storm active regardless of season.
@@ -53,6 +53,17 @@
 ### Gentle Snow
 - Small size slow moving "Storm". Clear weather, gentle wind, snow.
 - Only active in north of 38N. Show up in Winter/Spring if Climate custom wind enable.
+## Storm music player
+- You will start hear the music when you enter it's effect radius, the closer you're to the core, the louder the music
+- put your .ogg file in plugins\BetterStorm\Music, and name the file name as following:
+  - DryThunderstorm
+  - GentleSnow
+  - HighPressure
+  - Hurricane
+  - MagneticMist
+  - Sandstorm
+- Default not looping music, can be set to loop in configurator
+- Vanilla Storm and Squall not supported.
 ## Bug fix
 - Fix thunder audio bug so it will play all 10 sound source. (Vanilla skip 2)
 - Thunder sound actually comes from where lighting strike, instead of always from latest lighting strike position.
