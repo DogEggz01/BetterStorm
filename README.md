@@ -2,6 +2,7 @@
 *Disclaimer: This mod is made with ChatGPT 5.6 Sol*
 ### This mod have increased particles generation, it will affect performance on low spec computer
 ## Universal storm changes
+- Vanilla Storm got a much bigger storm cloud, actual radius stay the same.
 - Storm wind bonus now start increasing at storm effect radius, and reach maximum at (storm core radius/2).
 - Lighting now happen in the maximum storm wind area, so you can know approximately where it is.
 - Lighting now spawn in circulus area, instead of vanilla square area.
@@ -48,7 +49,7 @@
 - Slow moving smaller storm, no rain, good visibility but a lot of bright lighting. Strong wind.
 - Only active in Aestrin and Chronos sea. Show up in Autumn/Winter if climate custom wind enable.
 ### Hurricane
-- Huge storm and little bit slower than vanilla storm. You can hear lighting from far away. Very strong wind, heavier rain.
+- Huge storm and little bit slower than vanilla storm. You can hear lighting from far away. Very strong wind, heavier rain. Got a storm eye.
 - Only active in Emerald Archipelagos, Fire Fish Lagoon and Chronos Sea. Show up in Summer/Autumn if climate custom wind enable.
 ### Gentle Snow
 - Small size slow moving "Storm". Clear weather, gentle wind, snow.
