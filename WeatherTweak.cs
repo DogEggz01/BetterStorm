@@ -73,14 +73,20 @@ namespace BetterStorm
         internal readonly float WeatherRange;
         internal readonly float OuterEdge;
         internal readonly float WeatherLerp;
+        internal readonly StormEyeShape Eye;   // the storm's eye (StormEye), null when it has none
+        private readonly float eyeClearness;   // its clearness as shown (StormEye.ClearnessOf: eased in time)
 
         internal StormInfluence(
             ModStormController controller,
             float centerDistance,
             float radius,
-            float weatherRange)
+            float weatherRange,
+            StormEyeShape eye,
+            float eyeClearness)
         {
             Definition = controller != null ? controller.Definition : null;
+            Eye = eye;
+            this.eyeClearness = eyeClearness;
             CenterDistance = centerDistance;
             Radius = radius;
             WeatherRange = weatherRange;
@@ -113,9 +119,11 @@ namespace BetterStorm
             }
         }
 
+        // full at half the core radius (the game's rule); with an eye, full from the wall's inner side out to
+        // StormEyeShape.FullWindOuter (the user, after probe 15: "move the storm and wind back to the wall gap", "Wall's inner side")
         internal float WindLerp
         {
-            get { return Mathf.InverseLerp(OuterEdge, Radius * 0.5f, CenterDistance); }
+            get { return Mathf.InverseLerp(OuterEdge, Eye != null ? Eye.FullWindOuter : Radius * 0.5f, CenterDistance); }
         }
 
         internal bool IsSquall
@@ -141,6 +149,25 @@ namespace BetterStorm
         internal bool IsMagneticMist
         {
             get { return Definition != null && Definition.Kind == StormKind.MagneticMist; }
+        }
+
+        internal bool IsHurricane
+        {
+            get { return Definition != null && Definition.Kind == StormKind.Hurricane; }
+        }
+
+        // A storm's eye (StormEyeShape): 1 inside it, 0 from its wall out; 0 for a storm without one. As the eye shows it
+        // (StormEye.ClearnessOf): it follows the distance at most a full change in 1.5 s, so the sky, rain and clouds fade with it.
+        internal float EyeClearness
+        {
+            get { return Eye != null ? eyeClearness : 0f; }
+        }
+
+        // The depth the rain bands use: the eye is clear, its wall runs back through cloudy and rain to storm.
+        // NormalizedDistance itself stays the storm's (selection and retention).
+        internal float RainNormalizedDistance
+        {
+            get { return Mathf.Max(NormalizedDistance, EyeClearness); }
         }
     }
 
@@ -205,7 +232,7 @@ namespace BetterStorm
                 : null;
             float radius = storm != null ? storm.GetRadius() : 0f;
             float range = GetWeatherRange(weatherStorms, controller);
-            return new StormInfluence(controller, distance, radius, range);
+            return new StormInfluence(controller, distance, radius, range, StormEye.ShapeOf(storm), StormEye.ClearnessOf(storm));
         }
 
         internal static float GetWeatherRange(
@@ -401,7 +428,13 @@ namespace BetterStorm
                 selectedDistance = dryThunderstormOverrideDistance;
             }
 
-            ___currentStorm = selected;
+            // with no storm active the game's current storm is kept, as the game does (its ApplyStorm reads it every 0.05 s and
+            // would throw on none); the distance is the game's "none", so no storm controls the weather
+            if (selected != null)
+            {
+                ___currentStorm = selected;
+            }
+
             WeatherStorms.currentStormDistance = selected != null
                 ? selectedDistance
                 : 100000000f;
@@ -477,6 +510,7 @@ namespace BetterStorm
             bool insideSquall = influence.IsSquall;
             bool insideGentleSnow = influence.IsGentleSnow;
             bool insideDoldrums = influence.IsDoldrums;
+            bool insideEye = influence.Eye != null && StormEyeWind.InEye;
             if ((insideSquall && !wasInsideSquall) ||
                 (insideGentleSnow && !wasInsideGentleSnow))
             {
@@ -484,8 +518,8 @@ namespace BetterStorm
                 StormAccess.GustTimer(wind) = 0f;
             }
 
-            // The Doldrums keeps the normal gust interval (no stretch).
-            float gustInterval = insideDoldrums
+            // The Doldrums and a storm's eye keep the normal gust interval (no stretch).
+            float gustInterval = insideDoldrums || insideEye
                 ? normalGustInterval
                 : Mathf.Lerp(
                     normalGustInterval,
@@ -842,6 +876,12 @@ namespace BetterStorm
                 return false;
             }
 
+            // a storm's eye: vanilla gusts around its calm
+            if (influence.Eye != null && StormEyeWind.InEye)
+            {
+                return true;
+            }
+
             if (influence.IsDoldrums)
             {
                 // The orb's wind gets vanilla gusts (0.67-1.33).
@@ -902,8 +942,17 @@ namespace BetterStorm
             StormAccess.LightningCooldown(__instance) =
                 UnityEngine.Random.Range(interval, interval * 3f);
 
-            Vector2 offset = UnityEngine.Random.insideUnitCircle *
-                profile.SpawnRadius;
+            // A storm with an eye strikes only outside it, evenly over a ring from the wall's inner side (StormEyeShape.StormEdge); a
+            // game storm's storm cloud has no eye: the game's strikes.
+            StormEye eye = __instance.GetComponentInParent<StormEye>();
+            float scale = eye != null ? Mathf.Max(0.0001f, eye.transform.lossyScale.x) : 1f;
+            Vector2 offset = eye != null && eye.Shape != null && eye.Shape.HasEye
+                ? StormEyeShape.StrikeOffset(
+                    UnityEngine.Random.value,
+                    UnityEngine.Random.value,
+                    eye.Shape.StormEdge / scale,
+                    eye.Shape.StrikeOuter / scale)
+                : UnityEngine.Random.insideUnitCircle * profile.SpawnRadius;
             __instance.transform.localPosition = new Vector3(
                 offset.x,
                 profile.StrikeHeight,
@@ -1786,7 +1835,8 @@ namespace BetterStorm
             else if (influence.Kind == StormKind.Vanilla)
             {
                 WeatherParticlesSettings particles = StormAccess.FinalParticles(weather);
-                baseRain = particles != null ? particles.rainDensity : 0f;
+                // none in the eye, Climate's pressure rain included
+                baseRain = particles != null ? particles.rainDensity * (1f - influence.EyeClearness) : 0f;
                 peak = region.stormWeather.particles.rainDensity;
                 rainIntensity = Mathf.Max(0f, baseRain);
             }
@@ -1797,7 +1847,7 @@ namespace BetterStorm
                     return false;
                 peak = influence.Definition.RainTarget.Value;
                 baseRain = StormRainRules.GetBaseRain(
-                    influence.NormalizedDistance, StormAccess.CloudyBorder(storms),
+                    influence.RainNormalizedDistance, StormAccess.CloudyBorder(storms),
                     StormAccess.RainBorder(storms), region.cloudyWeather.particles.rainDensity,
                     region.rainWeather.particles.rainDensity, peak);
                 rainIntensity = Mathf.Max(0f, baseRain);
@@ -1875,7 +1925,8 @@ namespace BetterStorm
             SandstormVisuals.Deactivate();
             GentleSnowVisuals.Deactivate();
             if (influence.Definition.SuppressFog) RenderSettings.fogDensity = 0f;
-            if (influence.Definition.SuppressRainParticles)
+            // a storm's eye is as clear as High Pressure: no rain, Climate's pressure rain included
+            if (influence.Definition.SuppressRainParticles || influence.EyeClearness >= 1f)
             {
                 CustomPrecipitationParticles.SetEmissionRate(___rain, 0f);
                 CustomPrecipitationParticles.SetEmissionRate(___outerRain, 0f);
@@ -1924,6 +1975,18 @@ namespace BetterStorm
         }
     }
 
+    [HarmonyPatch(typeof(BoatRefs), "RegisterMast")]
+    internal static class BoatRefsRegisterMastPatch
+    {
+        // IndoorPrecipitationExclusion's list of boats; a postfix, so it runs even when another mod's prefix skips the original
+        // (UnstayedJunkSailMast skips a mast registering twice)
+        [HarmonyPostfix]
+        private static void Postfix(BoatRefs __instance)
+        {
+            IndoorPrecipitationExclusion.AddBoat(__instance);
+        }
+    }
+
     // Native overlap testing on existing visible-boat volumes. No particle
     // readback, per-particle C# callbacks, world queries or walk-copy raycasts.
     internal sealed class IndoorPrecipitationExclusion : MonoBehaviour
@@ -1941,6 +2004,20 @@ namespace BetterStorm
         }
 
         private static readonly List<Interior> interiors = new List<Interior>();
+        // Each boat model's interior volumes, searched once and kept (the user, 2026-10-27, option B of the once-a-second scan's
+        // 2.7 ms spike): a scan goes over the listed boats (boats) but searches only a model not seen before. The model the player
+        // embarks is searched again, as a shipyard can change its hull and cabins ("it should rescan everytime player embark the ship,
+        // since hull could be changed in shipyard").
+        private static readonly Dictionary<Transform, List<Interior>> byModel = new Dictionary<Transform, List<Interior>>();
+        private static readonly List<Transform> staleModels = new List<Transform>();
+        // The boats, listed as each registers a mast (BoatRefsRegisterMastPatch: every Mast's Awake calls BoatRefs.RegisterMast) and
+        // as the player embarks one (a boat with no mast), instead of searched in the scene at each scan: FindObjectsOfType<BoatRefs>
+        // was about 3.4 ms of the scan's 3.9 (run 20261027-211441; the user, 2026-10-27: "Keep a list of boats as each one registers
+        // a mast"). Never cleared by ResetCaches, which runs from WeatherStorms.Start after the masts' Awake: a destroyed boat is
+        // dropped at the next scan.
+        private static readonly HashSet<BoatRefs> boats = new HashSet<BoatRefs>();
+        private static readonly List<BoatRefs> goneBoats = new List<BoatRefs>();
+        private static Transform watchedBoat;
         private static float nextDiscovery;
         private ParticleSystem particles;
         private Interior[] selected;
@@ -1970,9 +2047,33 @@ namespace BetterStorm
             nextDiscovery = 0f;
         }
 
+        internal static void AddBoat(BoatRefs boat)
+        {
+            if (boat != null) boats.Add(boat);
+        }
+
         internal static void ResetCaches()
         {
             interiors.Clear();
+            byModel.Clear();
+            watchedBoat = null;
+            nextDiscovery = 0f;
+        }
+
+        // Every frame (the plugin's Update), rain or not, so an embark in clear weather counts too: the boat the player embarks
+        // (GameState.currentBoat, its model, set by every embark path and by a shipyard admitting a ship) is searched again at the
+        // next scan.
+        internal static void Tick()
+        {
+            Transform boat = GameState.currentBoat;
+            if (boat == watchedBoat) return;
+            watchedBoat = boat;
+            if (boat == null) return;
+            AddBoat(boat.GetComponentInParent<BoatRefs>());
+            foreach (Transform model in byModel.Keys)
+                if (model == null || boat == model || boat.IsChildOf(model)) staleModels.Add(model);
+            foreach (Transform model in staleModels) byModel.Remove(model);
+            staleModels.Clear();
             nextDiscovery = 0f;
         }
 
@@ -1981,19 +2082,36 @@ namespace BetterStorm
             if (Time.unscaledTime < nextDiscovery) return;
             nextDiscovery = Time.unscaledTime + 1f;
             interiors.Clear();
-            foreach (BoatRefs boat in UnityEngine.Object.FindObjectsOfType<BoatRefs>())
+            foreach (BoatRefs boat in boats)
             {
-                if (boat.boatModel == null) continue;
-                foreach (InteriorEffectsTrigger volume in
-                    boat.boatModel.GetComponentsInChildren<InteriorEffectsTrigger>(true))
+                if (boat == null)
                 {
-                    // Include inactive cabin options now; activation/removal is
-                    // handled without rescanning the scene or changing physics.
-                    foreach (Collider collider in volume.GetComponents<Collider>())
-                        interiors.Add(new Interior { BoatModel = boat.boatModel,
-                            Volume = volume, Collider = collider });
+                    goneBoats.Add(boat);
+                    continue;
                 }
+                Transform model = boat.boatModel;
+                if (model == null) continue;
+                if (!byModel.TryGetValue(model, out List<Interior> found))
+                {
+                    found = new List<Interior>();
+                    foreach (InteriorEffectsTrigger volume in model.GetComponentsInChildren<InteriorEffectsTrigger>(true))
+                    {
+                        // Include inactive cabin options now; activation/removal is
+                        // handled without rescanning the scene or changing physics.
+                        foreach (Collider collider in volume.GetComponents<Collider>())
+                            found.Add(new Interior { BoatModel = model, Volume = volume, Collider = collider });
+                    }
+                    byModel[model] = found;
+                }
+                interiors.AddRange(found);
             }
+            // boats and models destroyed since (sunk, sold or unloaded) dropped
+            foreach (BoatRefs boat in goneBoats) boats.Remove(boat);
+            goneBoats.Clear();
+            foreach (Transform model in byModel.Keys)
+                if (model == null) staleModels.Add(model);
+            foreach (Transform model in staleModels) byModel.Remove(model);
+            staleModels.Clear();
         }
 
         private void Update()

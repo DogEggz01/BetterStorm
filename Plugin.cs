@@ -26,7 +26,7 @@ namespace BetterStorm
     {
         public const string PluginGuid = "DogEggz.BetterStorm";
         public const string PluginName = "Better Storm";
-        public const string PluginVersion = "1.2.0";
+        public const string PluginVersion = "1.2.1";
 
         public const string ChaoticWindGuid = "com.pete.sailwind.windconfigurator";
         public const string ClimateGuid = "com.raddude.climate";
@@ -46,6 +46,10 @@ namespace BetterStorm
         internal ConfigEntry<bool> DisableSeasonLimits { get; private set; }
         internal ConfigEntry<float> FallbackBonusCap { get; private set; }
         internal ConfigEntry<int> RelocationDistance { get; private set; }
+        internal ConfigEntry<int> MistFollowHours { get; private set; }
+        internal ConfigEntry<float> StormMusicVolume { get; private set; }
+        internal ConfigEntry<bool> StormMusicLoop { get; private set; }
+        internal readonly Dictionary<StormKind, ConfigEntry<bool>> StormMusicOn = new Dictionary<StormKind, ConfigEntry<bool>>();
         private void Awake()
         {
             Instance = this;
@@ -84,13 +88,17 @@ namespace BetterStorm
         {
             WindOverrideState.Tick();
             DoldrumsWind.Tick();
+            StormEyeWind.Tick();
             MagneticField.Tick();
             MagneticSky.Tick();
             MistFogDome.Tick();
+            StormHorizonFog.Tick();
             MagneticMistRain.Tick();
             SandstormVisuals.Tick();
             GentleSnowVisuals.Tick();
             SandstormDirt.Tick();
+            StormMusic.Tick();
+            IndoorPrecipitationExclusion.Tick();
         }
 
         private void OnDestroy()
@@ -98,8 +106,10 @@ namespace BetterStorm
             Unsubscribe();
             WindOverrideState.RestoreImmediately();
             DoldrumsWind.RestoreImmediately();
+            StormEyeWind.RestoreImmediately();
             // ShutdownTransientEffects also restores the Magnetic Mist's sky (MagneticSky.Restore).
             RuntimeEffectLifecycle.ShutdownTransientEffects();
+            RenderFog.Shutdown();   // kept across loads (the storms' eyes stay), so only here
             GlobalLightningSettings.RestoreSnapshots();
             ModStormFactory.Shutdown();
             StormPositionPersistence.ResetAll();
@@ -151,6 +161,61 @@ namespace BetterStorm
                     new ConfigurationManagerAttributes
                     {
                         ShowRangeAsPercent = false,
+                        Order = 10
+                    }));
+
+            MistFollowHours = Config.Bind(
+                "Magnetic Mist", "Follow Time (in-game hours)",
+                MagneticMistRules.DefaultFollowHours,
+                new ConfigDescription(
+                    "How long the Magnetic Mist follows you after it captures you (in-game hours). " +
+                    "A change applies at once, also to a follow already running.",
+                    new AcceptableValueList<int>(MagneticMistRules.FollowHourOptions),
+                    new ConfigurationManagerAttributes { Order = 10 }));
+
+            // Storm music: one toggle per storm and the volume, drawn together in the Storm Music panel (the user,
+            // 2026-10-25: "make storm music able to toggle on and off individually, make storm music a drop down list
+            // like debug option"); the entries themselves are hidden from the list but kept in the config file.
+            foreach (KeyValuePair<StormKind, string> storm in StormMusic.DisplayNames)
+            {
+                StormMusicOn[storm.Key] = Config.Bind(
+                    "Storm Music", "Play " + storm.Value + " Music", false,
+                    new ConfigDescription(
+                        "Play your own " + StormMusic.FileNameOf(storm.Key) + ".ogg or .wav from the Music folder next to " +
+                        "BetterStorm.dll inside the " + storm.Value + ".",
+                        null,
+                        new ConfigurationManagerAttributes { Browsable = false }));
+            }
+
+            StormMusicVolume = Config.Bind(
+                "Storm Music", "Storm Music Volume", 0.5f,
+                new ConfigDescription(
+                    "The music's volume at a storm's centre (the game's own volume also applies).",
+                    new SteppedAcceptableValueRange(0f, 1f, 0.05f),
+                    new ConfigurationManagerAttributes { Browsable = false }));
+
+            // played once by default, looped as an option (the user, 2026-10-27: "Music player should default only play the
+            // soundtrack once, add a option to loop")
+            StormMusicLoop = Config.Bind(
+                "Storm Music", "Loop Storm Music", false,
+                new ConfigDescription(
+                    "On: a storm's song starts again each time it ends. Off: it plays once each time you enter the storm.",
+                    null,
+                    new ConfigurationManagerAttributes { Browsable = false }));
+
+            Config.Bind(
+                "Storm Music", "Storm Music", string.Empty,
+                new ConfigDescription(
+                    "Your own music inside six storms (Better Storm ships none): put your files in the Music folder next to " +
+                    "BetterStorm.dll, named " + StormMusic.FileList + " (.ogg in Vorbis, or .wav). Expand the panel to switch " +
+                    "each storm's music on or off, loop it or not, and set the volume. The music starts at the storm's outer edge " +
+                    "and grows louder toward its centre; it plays once each time you enter the storm unless it loops.",
+                    null,
+                    new ConfigurationManagerAttributes
+                    {
+                        CustomDrawer = StormMusicControls.Draw,
+                        HideDefaultButton = true,
+                        HideSettingName = true,
                         Order = 10
                     }));
 
@@ -292,7 +357,357 @@ namespace BetterStorm
             SandstormDirt.Reset();
             MagneticSky.Restore();
             MistFogDome.Shutdown();
+            StormHorizonFog.Shutdown();
             MagneticMistRain.Reset();
+            StormMusic.Shutdown();
+        }
+    }
+
+    // The Storm Music panel in the configuration manager, folded like the debug storm controls: each storm's music on or
+    // off with what became of its file, and the volume.
+    internal static class StormMusicControls
+    {
+        private const float DrawerWidth = 250f;
+        private static bool expanded;
+
+        internal static void Draw(ConfigEntryBase unused)
+        {
+            if (GUILayout.Button(expanded ? "[-] Storm Music" : "[+] Storm Music", GUILayout.Width(DrawerWidth)))
+            {
+                expanded = !expanded;
+            }
+
+            BetterStormPlugin plugin = BetterStormPlugin.Instance;
+            if (!expanded || plugin == null)
+            {
+                return;
+            }
+
+            GUILayout.BeginVertical(GUILayout.Width(DrawerWidth));
+            foreach (KeyValuePair<StormKind, string> storm in StormMusic.DisplayNames)
+            {
+                ConfigEntry<bool> entry = plugin.StormMusicOn[storm.Key];
+                bool on = GUILayout.Toggle(entry.Value, storm.Value + " (" + StormMusic.FileState(storm.Key) + ")",
+                    GUILayout.Width(DrawerWidth));
+                if (on != entry.Value)
+                {
+                    entry.Value = on;
+                }
+            }
+
+            GUILayout.Space(4f);
+            ConfigEntry<bool> loop = plugin.StormMusicLoop;
+            bool looped = GUILayout.Toggle(loop.Value, "Loop the song (off: play it once)", GUILayout.Width(DrawerWidth));
+            if (looped != loop.Value)
+            {
+                loop.Value = looped;
+            }
+
+            ConfigEntry<float> volume = plugin.StormMusicVolume;
+            GUILayout.Label("Volume " + Mathf.RoundToInt(volume.Value * 100f) + " %", GUILayout.Width(DrawerWidth));
+            float value = Mathf.Round(GUILayout.HorizontalSlider(volume.Value, 0f, 1f, GUILayout.Width(DrawerWidth)) * 20f) / 20f;
+            if (!Mathf.Approximately(value, volume.Value))
+            {
+                volume.Value = value;
+            }
+
+            GUILayout.EndVertical();
+        }
+    }
+
+    // Storm music (STORM_UPDATE_SPEC.md §5; the user, 2026-10-25), each storm's off by default. The player's own files, never shipped:
+    // <plugin folder>\Music\<storm>.ogg or .wav for six storms, each loaded when its storm takes control and unloaded after it stops. One 2D
+    // AudioSource with no mixer group, like the game's own music (UnderwaterMusic), so the game's volume applies; the song played once
+    // each visit, or looped ("Loop Storm Music").
+    // The storm in control plays its file from the start on entering its outer edge, louder toward the centre; leaving (or
+    // switching that storm's music off) fades it out over 5 s from its volume then, and only then does another storm's file start.
+    internal static class StormMusic
+    {
+        internal const float FadeOutSeconds = 5f;   // the user, 2026-10-25: "when leaving storm the music should fade out in 5 sec"
+        internal const float EdgeShare = 0.1f;   // the volume at the outer edge, as a share of the centre's
+
+        private static readonly Dictionary<StormKind, string> FileNames = new Dictionary<StormKind, string>
+        {
+            { StormKind.Sandstorm, "Sandstorm" },
+            { StormKind.DryThunderstorm, "DryThunderstorm" },
+            { StormKind.Hurricane, "Hurricane" },
+            { StormKind.GentleSnow, "GentleSnow" },
+            { StormKind.Doldrums, "HighPressure" },   // shown in game as High Pressure
+            { StormKind.MagneticMist, "MagneticMist" }
+        };
+
+        // the names the player sees, in the panel's order
+        internal static readonly Dictionary<StormKind, string> DisplayNames = new Dictionary<StormKind, string>
+        {
+            { StormKind.Sandstorm, "Sandstorm" },
+            { StormKind.DryThunderstorm, "Dry Thunderstorm" },
+            { StormKind.Hurricane, "Hurricane" },
+            { StormKind.GentleSnow, "Gentle Snow" },
+            { StormKind.Doldrums, "High Pressure" },
+            { StormKind.MagneticMist, "Magnetic Mist" }
+        };
+
+        private static readonly Dictionary<StormKind, AudioClip> clips = new Dictionary<StormKind, AudioClip>();
+        private static readonly HashSet<StormKind> failed = new HashSet<StormKind>();
+        private static readonly Dictionary<StormKind, UnityEngine.Networking.UnityWebRequest> loading =
+            new Dictionary<StormKind, UnityEngine.Networking.UnityWebRequest>();
+        private static AudioSource source;
+        private static StormKind playing = StormKind.Vanilla;
+        private static float fadeFrom = -1f;   // the volume a fade-out started from; -1 while not fading
+
+        internal static string FileList
+        {
+            get { return string.Join(", ", new List<string>(FileNames.Values).ToArray()); }
+        }
+
+        internal static string FileNameOf(StormKind kind)
+        {
+            return FileNames[kind];
+        }
+
+        // for the panel: what became of a storm's file
+        internal static string FileState(StormKind kind)
+        {
+            if (clips.ContainsKey(kind)) return "loaded";
+            if (loading.ContainsKey(kind)) return "loading";
+            if (failed.Contains(kind)) return HasFile(kind) ? "can't play" : "no file";
+            return HasFile(kind) ? "file found" : "no file";
+        }
+
+        private static bool HasFile(StormKind kind)
+        {
+            string stem = System.IO.Path.Combine(MusicFolder, FileNames[kind]);
+            return System.IO.File.Exists(stem + ".ogg") || System.IO.File.Exists(stem + ".wav");
+        }
+
+        internal static string MusicFolder
+        {
+            get { return System.IO.Path.Combine(System.IO.Path.GetDirectoryName(typeof(StormMusic).Assembly.Location), "Music"); }
+        }
+
+        // the volume inside a storm: `setting` at the centre, EdgeShare of it at the outer edge
+        internal static float TargetVolume(float setting, float distance, float outerEdge)
+        {
+            return setting * Mathf.Lerp(EdgeShare, 1f, Mathf.InverseLerp(outerEdge, 0f, distance));
+        }
+
+        // for the QA: the storm whose file is on the source, and each storm's load state
+        internal static StormKind Playing
+        {
+            get { return playing; }
+        }
+
+        internal static AudioSource Source
+        {
+            get { return source; }
+        }
+
+        internal static bool TryGetClip(StormKind kind, out AudioClip clip)
+        {
+            return clips.TryGetValue(kind, out clip);
+        }
+
+        internal static bool Failed(StormKind kind)
+        {
+            return failed.Contains(kind);
+        }
+
+        internal static void Tick()
+        {
+            FinishLoads();
+            BetterStormPlugin plugin = BetterStormPlugin.Instance;
+            StormKind wanted = StormKind.Vanilla;
+            float target = 0f;
+            if (plugin != null && GameState.playing && StormInfluenceService.TryGetCurrent(out StormInfluence influence) &&
+                plugin.StormMusicOn.TryGetValue(influence.Kind, out ConfigEntry<bool> on) && on.Value)
+            {
+                wanted = influence.Kind;
+                target = TargetVolume(plugin.StormMusicVolume.Value, influence.CenterDistance, influence.OuterEdge);
+                StartLoad(wanted);
+            }
+
+            if (playing != StormKind.Vanilla && playing != wanted)
+            {
+                // leaving, or another storm took control: fade out first, over FadeOutSeconds from wherever it was
+                if (fadeFrom < 0f)
+                {
+                    fadeFrom = source.volume;
+                }
+
+                source.volume = Mathf.MoveTowards(source.volume, 0f,
+                    Mathf.Max(fadeFrom, 0.0001f) / FadeOutSeconds * Time.unscaledDeltaTime);
+                if (source.volume <= 0f)
+                {
+                    fadeFrom = -1f;
+                    source.Stop();
+                    source.clip = null;
+                    // the game keeps a loaded song decompressed (DecompressOnLoad: about 45 MB for 4 stereo minutes, run
+                    // 20261025-130408), so only the playing storm's stays loaded; loaded again next time (all six in 0.6 s)
+                    if (clips.TryGetValue(playing, out AudioClip stopped))
+                    {
+                        clips.Remove(playing);
+                        UnityEngine.Object.Destroy(stopped);
+                    }
+
+                    playing = StormKind.Vanilla;
+                }
+
+                return;
+            }
+
+            if (wanted == StormKind.Vanilla)
+            {
+                return;
+            }
+
+            if (playing == StormKind.Vanilla)
+            {
+                if (!clips.TryGetValue(wanted, out AudioClip clip) || !EnsureSource())
+                {
+                    return;   // still loading, or no file for this storm
+                }
+
+                source.clip = clip;
+                source.time = 0f;
+                source.volume = target;
+                source.loop = plugin.StormMusicLoop.Value;
+                source.Play();
+                playing = wanted;
+            }
+
+            fadeFrom = -1f;   // back in (also mid-fade): the storm's volume again
+            source.volume = target;
+            // played once by default: a song that ended stays silent for the rest of this visit (the next visit plays it again);
+            // switched to loop after it ended, it starts again
+            bool looped = plugin.StormMusicLoop.Value;
+            source.loop = looped;
+            if (looped && !source.isPlaying && !AudioListener.pause)
+            {
+                source.time = 0f;
+                source.Play();
+            }
+        }
+
+        internal static void Shutdown()
+        {
+            foreach (UnityEngine.Networking.UnityWebRequest request in loading.Values)
+            {
+                request.Dispose();
+            }
+
+            loading.Clear();
+            if (source != null)
+            {
+                UnityEngine.Object.Destroy(source.gameObject);
+                source = null;
+            }
+
+            foreach (AudioClip clip in clips.Values)
+            {
+                if (clip != null)
+                {
+                    UnityEngine.Object.Destroy(clip);
+                }
+            }
+
+            clips.Clear();
+            failed.Clear();
+            playing = StormKind.Vanilla;
+            fadeFrom = -1f;
+        }
+
+        private static void StartLoad(StormKind kind)
+        {
+            if (clips.ContainsKey(kind) || failed.Contains(kind) || loading.ContainsKey(kind))
+            {
+                return;
+            }
+
+            string path = System.IO.Path.Combine(MusicFolder, FileNames[kind] + ".ogg");
+            AudioType type = AudioType.OGGVORBIS;
+            if (!System.IO.File.Exists(path))
+            {
+                path = System.IO.Path.Combine(MusicFolder, FileNames[kind] + ".wav");
+                type = AudioType.WAV;
+            }
+
+            if (!System.IO.File.Exists(path))
+            {
+                failed.Add(kind);   // no file: this storm stays silent
+                return;
+            }
+
+            UnityEngine.Networking.UnityWebRequest request =
+                UnityEngine.Networking.UnityWebRequestMultimedia.GetAudioClip(new Uri(path).AbsoluteUri, type);
+            ((UnityEngine.Networking.DownloadHandlerAudioClip)request.downloadHandler).compressed = true;   // kept compressed in memory
+            request.SendWebRequest();
+            loading.Add(kind, request);
+        }
+
+        private static void FinishLoads()
+        {
+            if (loading.Count == 0)
+            {
+                return;
+            }
+
+            List<StormKind> done = null;
+            foreach (KeyValuePair<StormKind, UnityEngine.Networking.UnityWebRequest> pair in loading)
+            {
+                if (pair.Value.isDone)
+                {
+                    (done ?? (done = new List<StormKind>())).Add(pair.Key);
+                }
+            }
+
+            if (done == null)
+            {
+                return;
+            }
+
+            foreach (StormKind kind in done)
+            {
+                UnityEngine.Networking.UnityWebRequest request = loading[kind];
+                loading.Remove(kind);
+                AudioClip clip = null;
+                if (!request.isNetworkError && !request.isHttpError)
+                {
+                    clip = UnityEngine.Networking.DownloadHandlerAudioClip.GetContent(request);
+                }
+
+                if (clip != null && clip.length > 0f && clip.loadState != AudioDataLoadState.Failed)
+                {
+                    clip.name = "Better Storm music " + FileNames[kind];
+                    clips[kind] = clip;
+                    BetterStormPlugin.Instance?.LogFeatureInfo("Storm music for " + FileNames[kind] + " loaded (" +
+                        clip.length.ToString("F0") + " s).");
+                }
+                else
+                {
+                    failed.Add(kind);
+                    BetterStormPlugin.Instance?.LogFeatureWarning("Storm music for " + FileNames[kind] + " could not be loaded (" +
+                        (string.IsNullOrEmpty(request.error) ? "no audio in the file; Ogg files must be Vorbis, not Opus" : request.error) +
+                        "): that storm stays silent.");
+                }
+
+                request.Dispose();
+            }
+        }
+
+        private static bool EnsureSource()
+        {
+            if (source != null)
+            {
+                return true;
+            }
+
+            GameObject go = new GameObject("Better Storm storm music");
+            UnityEngine.Object.DontDestroyOnLoad(go);
+            source = go.AddComponent<AudioSource>();
+            source.loop = false;   // set from "Loop Storm Music" as it plays (Tick)
+            source.playOnAwake = false;
+            source.spatialBlend = 0f;   // 2D, like the game's own music
+            return true;
         }
     }
 
@@ -379,6 +794,7 @@ namespace BetterStorm
         public bool? HideSettingName;
         public string DispName = null;
         public int? Order;
+        public bool? Browsable;   // false: kept in the config file, not listed (drawn by a custom panel)
     }
 
     internal sealed class SteppedAcceptableValueRange : AcceptableValueRange<float>
@@ -511,6 +927,8 @@ namespace BetterStorm
             AccessTools.FieldRefAccess<WeatherStorms, float>("rainBorder");
         internal static readonly AccessTools.FieldRef<WeatherStorms, float> CloudyBorder =
             AccessTools.FieldRefAccess<WeatherStorms, float>("cloudyBorder");
+        internal static readonly AccessTools.FieldRef<WeatherStorms, WeatherSet> BlendedSet =
+            AccessTools.FieldRefAccess<WeatherStorms, WeatherSet>("blendedSet");
         internal static readonly AccessTools.FieldRef<Weather, WeatherParticlesSettings> FinalParticles =
             AccessTools.FieldRefAccess<Weather, WeatherParticlesSettings>("finalParticles");
 
@@ -792,7 +1210,7 @@ namespace BetterStorm
                 GUILayout.Label(MagneticMistFollow.DescribeState(), GUILayout.Width(DrawerWidth));
                 if (GUILayout.Button("End follow now", GUILayout.Width(DrawerWidth)))
                 {
-                    MagneticMistFollow.DebugEndFollow();   // starts the 120 h cooldown
+                    MagneticMistFollow.DebugEndFollow();   // starts the 168 h cooldown
                 }
                 if (GUILayout.Button("Clear cooldown", GUILayout.Width(DrawerWidth)))
                 {
