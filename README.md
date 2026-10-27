@@ -26,6 +26,8 @@
 - Don't happen above 37N, only 1 copy so it's rare
 - Show up in all area and all season, it's not visible on sea (no storm cloud)(duh)
 ### Magnetic Mist
+<img width="3840" height="2160" alt="20907F~1" src="https://github.com/user-attachments/assets/f02f148d-f6bd-42b4-bbd7-7d6b4abbea5c" />
+
 - A light rain mist with aurora, the closer you're to the core, the thicker the mist and the cloud. Only 1 copy.
 - Mist don't have special wind modifier, it will be same like you're not in storm.
 - As cloud getting thicker, it will block all the sunlight so you cannot use suncompass or chronocompass
@@ -43,15 +45,23 @@
 - All regional special storm only spawn once. So it will be more rare.
 - There is a toggle option to let all storm active regardless of season.
 ### Sandstorm
+<img width="3840" height="2160" alt="201522~1" src="https://github.com/user-attachments/assets/bd28f027-3efe-40cc-8855-bfc97aae150a" />
+
 - Fast moving pile of sand but smaller radius. Bad visibility, everything yellow, your boat get dirty fast.
 - Only active in Al'Ankh Sea. Show up in Spring/Summer if climate custom wind enable.
 ### Dry Thunderstorm
+<img width="3840" height="2160" alt="20C1CE~1" src="https://github.com/user-attachments/assets/c6e614d7-39c3-4825-99f1-97495dc1a02a" />
+
 - Slow moving smaller storm, no rain, good visibility but a lot of bright lighting. Strong wind.
 - Only active in Aestrin and Chronos sea. Show up in Autumn/Winter if climate custom wind enable.
 ### Hurricane
+<img width="3840" height="2160" alt="20A004~1" src="https://github.com/user-attachments/assets/3bcfe2f7-1bf0-403f-9052-ae4d117592ce" />
+
 - Huge storm and little bit slower than vanilla storm. You can hear lighting from far away. Very strong wind, heavier rain. Got a storm eye.
 - Only active in Emerald Archipelagos, Fire Fish Lagoon and Chronos Sea. Show up in Summer/Autumn if climate custom wind enable.
 ### Gentle Snow
+<img width="3840" height="2160" alt="208B17~1" src="https://github.com/user-attachments/assets/904fe4d2-1128-4a67-b0d4-80506cd0619f" />
+
 - Small size slow moving "Storm". Clear weather, gentle wind, snow.
 - Only active in north of 38N. Show up in Winter/Spring if Climate custom wind enable.
 ## Storm music player
