@@ -60,9 +60,9 @@
 - Huge storm and little bit slower than vanilla storm. You can hear lighting from far away. Very strong wind, heavier rain. Got a storm eye.
 - Only active in Emerald Archipelagos, Fire Fish Lagoon and Chronos Sea. Show up in Summer/Autumn if climate custom wind enable.
 ### Gentle Snow
-<img width="3840" height="2160" alt="208B17~1" src="https://github.com/user-attachments/assets/904fe4d2-1128-4a67-b0d4-80506cd0619f" />
+<img width="3840" height="2160" alt="2039A3~1" src="https://github.com/user-attachments/assets/d23ca3fd-44f4-48c9-ad2c-592f9188c5d3" />
 
-- Small size slow moving "Storm". Clear weather, gentle wind, snow.
+- Small size slow moving "Storm". Cloudy, gentle wind, snow.
 - Only active in north of 38N. Show up in Winter/Spring if Climate custom wind enable.
 ## Storm music player
 - You will start hear the music when you enter it's effect radius, the closer you're to the core, the louder the music
