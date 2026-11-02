@@ -26,7 +26,7 @@ namespace BetterStorm
     {
         public const string PluginGuid = "DogEggz.BetterStorm";
         public const string PluginName = "Better Storm";
-        public const string PluginVersion = "1.2.1";
+        public const string PluginVersion = "1.2.2";
 
         public const string ChaoticWindGuid = "com.pete.sailwind.windconfigurator";
         public const string ClimateGuid = "com.raddude.climate";
@@ -47,6 +47,7 @@ namespace BetterStorm
         internal ConfigEntry<float> FallbackBonusCap { get; private set; }
         internal ConfigEntry<int> RelocationDistance { get; private set; }
         internal ConfigEntry<int> MistFollowHours { get; private set; }
+        internal ConfigEntry<bool> ShowMistCloud { get; private set; }
         internal ConfigEntry<float> StormMusicVolume { get; private set; }
         internal ConfigEntry<bool> StormMusicLoop { get; private set; }
         internal readonly Dictionary<StormKind, ConfigEntry<bool>> StormMusicOn = new Dictionary<StormKind, ConfigEntry<bool>>();
@@ -88,6 +89,7 @@ namespace BetterStorm
         {
             WindOverrideState.Tick();
             DoldrumsWind.Tick();
+            GentleSnowWind.Tick();
             StormEyeWind.Tick();
             MagneticField.Tick();
             MagneticSky.Tick();
@@ -96,6 +98,7 @@ namespace BetterStorm
             MagneticMistRain.Tick();
             SandstormVisuals.Tick();
             GentleSnowVisuals.Tick();
+            GentleSnowBoats.Tick();
             SandstormDirt.Tick();
             StormMusic.Tick();
             IndoorPrecipitationExclusion.Tick();
@@ -106,9 +109,11 @@ namespace BetterStorm
             Unsubscribe();
             WindOverrideState.RestoreImmediately();
             DoldrumsWind.RestoreImmediately();
+            GentleSnowWind.RestoreImmediately();
             StormEyeWind.RestoreImmediately();
             // ShutdownTransientEffects also restores the Magnetic Mist's sky (MagneticSky.Restore).
             RuntimeEffectLifecycle.ShutdownTransientEffects();
+            GentleSnowBoats.Restore();
             RenderFog.Shutdown();   // kept across loads (the storms' eyes stay), so only here
             GlobalLightningSettings.RestoreSnapshots();
             ModStormFactory.Shutdown();
@@ -171,6 +176,15 @@ namespace BetterStorm
                     "How long the Magnetic Mist follows you after it captures you (in-game hours). " +
                     "A change applies at once, also to a follow already running.",
                     new AcceptableValueList<int>(MagneticMistRules.FollowHourOptions),
+                    new ConfigurationManagerAttributes { Order = 10 }));
+
+            // the mist's cloud on or off (LOOK_UPDATE_DRAFT.md §4.2; the user, 2026-10-31: "Make magnetic storm cloud togglable")
+            ShowMistCloud = Config.Bind(
+                "Magnetic Mist", "Show Mist Cloud", true,
+                new ConfigDescription(
+                    "Show the Magnetic Mist's fog bank. Off: no bank; the mist's fog, aurora, rain and the instruments' swing " +
+                    "stay. A change applies at once.",
+                    null,
                     new ConfigurationManagerAttributes { Order = 10 }));
 
             // Storm music: one toggle per storm and the volume, drawn together in the Storm Music panel (the user,
@@ -266,6 +280,7 @@ namespace BetterStorm
                 entry.SettingChanged += OnStormToggleChanged;
             }
             DisableSeasonLimits.SettingChanged += OnStormToggleChanged;
+            ShowMistCloud.SettingChanged += OnMistCloudChanged;
         }
 
         private void Unsubscribe()
@@ -275,6 +290,12 @@ namespace BetterStorm
                 entry.SettingChanged -= OnStormToggleChanged;
             }
             if (DisableSeasonLimits != null) DisableSeasonLimits.SettingChanged -= OnStormToggleChanged;
+            if (ShowMistCloud != null) ShowMistCloud.SettingChanged -= OnMistCloudChanged;
+        }
+
+        private void OnMistCloudChanged(object sender, EventArgs e)
+        {
+            ModStormFactory.Find(CustomStormId.MagneticMist)?.ApplyMistCloud();
         }
 
         private void OnStormToggleChanged(object sender, EventArgs e)
@@ -542,7 +563,7 @@ namespace BetterStorm
                     source.Stop();
                     source.clip = null;
                     // the game keeps a loaded song decompressed (DecompressOnLoad: about 45 MB for 4 stereo minutes, run
-                    // 20261025-130408), so only the playing storm's stays loaded; loaded again next time (all six in 0.6 s)
+                    // 20261025-130408), so only the playing storm's stays loaded; loaded again next time (the user's six in 1.6 s)
                     if (clips.TryGetValue(playing, out AudioClip stopped))
                     {
                         clips.Remove(playing);

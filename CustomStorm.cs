@@ -77,8 +77,8 @@ namespace BetterStorm
         internal static readonly LightningProfile VanillaLightning =
             new LightningProfile(
                 interval: 16f,
-                spawnRadius: 1500f,   // the game's (no eye since 1.2.1's in-game test, EYE_LAYER_DRAFT.md §5.9)
-                schedulingDistance: StormEyeShape.GameStormCloudDistance,   // out to their outer edge
+                spawnRadius: 1500f,   // about the game's area (its own strikes fall in a square of ±1,200); no eye since 1.2.1's test (EYE_LAYER_DRAFT.md §5.9)
+                schedulingDistance: StormEyeShape.GameStormOuterEdge,   // out to their outer edge
                 lightRange: 4980f,
                 strikeHeight: 500f,
                 lightIntensity: 3f);
@@ -215,11 +215,11 @@ namespace BetterStorm
                 Kind = StormKind.GentleSnow,
                 InitialOffset = new Vector3(12000f, 0f, 22000f),
                 Priority = 1,
-                Radius = 2500f,
+                Radius = GentleSnowRules.Radius,
                 ParticleDistance = 0f,
                 MoveSpeed = 7f,
                 UsesFixedWeatherRange = true,
-                FixedWeatherRange = 2000f,
+                FixedWeatherRange = GentleSnowRules.OuterEdge - GentleSnowRules.Radius,
                 WindCoefficient = 0f,
                 RainTarget = null,
                 SuppressRainParticles = true,
@@ -420,7 +420,14 @@ namespace BetterStorm
         internal const float WorldUnitsPerLatitude = 9000f;
         internal const float MaximumWindTarget = 18f;
         internal const float FinalLerpSpeed = 0.25f;
-        internal const float FullSnowNormalizedDistance = 0.33f;
+        // The look update (LOOK_UPDATE_DRAFT.md §4.5; the user's pick "Outer edge 8,000 (Recommended)", 2026-10-31): radius 3,000 and
+        // range 5,000 (2,500 and 2,000 before). From 8,000 to 7,000 the same as outside; the overcast gathers from 7,000 to 4,000
+        // (Overcast); the snow, the wind's own rules and the gusts' end from 4,500 in, the old edge (InnerEdge), the snow full by
+        // 3,160 as before (SnowFull: 2,500 + 0.33 x 2,000); the wind eased from the outside's to the snow's from 8,000 to 4,500
+        // (WindEase; the user: "Make wind graduately slow down from 8000 to 4500, then at 4500 original rules apply for gentle snow.")
+        internal const float Radius = 3000f, OuterEdge = 8000f, InnerEdge = 4500f, SnowFull = 3160f;
+        internal const float OvercastFrom = 7000f, OvercastFull = 4000f;
+        private const float OldWindCore = 1250f;   // where the old storm-wind share was full: half the old radius
 
         internal static bool IsLatitudeAllowed(
             float latitude,
@@ -453,12 +460,33 @@ namespace BetterStorm
                    relocationDistance;
         }
 
-        internal static float GetSnowEmissionLerp(float normalizedDistance)
+        internal static float GetSnowEmissionLerp(float distance)
         {
-            return Mathf.InverseLerp(
-                1f,
-                FullSnowNormalizedDistance,
-                normalizedDistance);
+            return Mathf.InverseLerp(InnerEdge, SnowFull, distance);
+        }
+
+        // the overcast: 0 out to 7,000, 1 from 4,000 in
+        internal static float Overcast(float distance)
+        {
+            return Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(OvercastFrom, OvercastFull, distance));
+        }
+
+        // the wind's way from the outside's (0, at 8,000) to the snow's (1, from 4,500 in)
+        internal static float WindEase(float distance)
+        {
+            return Mathf.InverseLerp(OuterEdge, InnerEdge, distance);
+        }
+
+        // within the old edge: the snow's own wind rules, as before the look update
+        internal static bool InCore(float distance)
+        {
+            return distance < InnerEdge;
+        }
+
+        // the storm-wind share the gust interval took before the look update (from the old edge to half the old radius)
+        internal static float CoreWindLerp(float distance)
+        {
+            return Mathf.InverseLerp(InnerEdge, OldWindCore, distance);
         }
     }
 
@@ -470,6 +498,9 @@ namespace BetterStorm
         private float oneSecondTimer;
         private bool latitudeParked;
         private ParticleSystem mistCloud;   // the Magnetic Mist's outer cloud ring
+        private bool allowedHere;           // the place's say (AllowedHere) as last asked (UpdateActive)
+        // the game asks again whether its storms may be active here only while they are over this far away (WanderingStorm.Update)
+        private const float RegionCheckDistance = 12000f;
 
         internal WanderingStorm Storm { get; private set; }
         internal StormDefinition Definition { get; private set; }
@@ -503,7 +534,7 @@ namespace BetterStorm
             if (definition.Kind == StormKind.MagneticMist)
             {
                 mistCloud = MistAurora.BuildCloud(this, bottomParticles, out Material outerCloud, out Material innerCloud);
-                MistAurora.Build(this, outerCloud, innerCloud);
+                MistAurora.Build(this, outerCloud, innerCloud, bottomParticles, mistCloud);
             }
 
             if (definition.SupportsLightning)
@@ -537,18 +568,46 @@ namespace BetterStorm
         // the debug panel, so its buttons also work near land.
         internal bool ShouldBeActive(bool ignoreOpenOcean)
         {
+            return IsActive(AllowedHere(), ignoreOpenOcean);
+        }
+
+        // switched on, the place's say (`allowed`) and, for the mist, open ocean
+        private bool IsActive(bool allowed, bool ignoreOpenOcean)
+        {
             BetterStormPlugin plugin = BetterStormPlugin.Instance;
-            Region region = GameplayRegionResolver.GetCurrentRegion();
             return plugin != null &&
                 plugin.IsEnabled(Definition.Id) &&
-                region != null &&
-                Definition.AllowsRegion(region.gameObject.name) &&
-                ClimateSeasonCompatibility.Allows(Definition) &&
-                region.stormCount >= Definition.Priority &&
-                StormLatitudePlacement.IsAllowed(transform, Definition) &&
+                allowed &&
                 (Definition.Kind != StormKind.MagneticMist ||
                  ignoreOpenOcean ||
                  MagneticMistOpenOcean.Check());
+        }
+
+        // the place's say: the region, the season, the region's storm count and the storm's latitude
+        private bool AllowedHere()
+        {
+            Region region = GameplayRegionResolver.GetCurrentRegion();
+            return region != null &&
+                Definition.AllowsRegion(region.gameObject.name) &&
+                ClimateSeasonCompatibility.Allows(Definition) &&
+                region.stormCount >= Definition.Priority &&
+                StormLatitudePlacement.IsAllowed(transform, Definition);
+        }
+
+        // The storm's activity, once a second, as the game takes its own storms' (WanderingStorm.Update): the place's say asked again
+        // only while the storm is over RegionCheckDistance away (`distance`, level), so a player inside it who crosses into a region or
+        // season where it isn't allowed keeps it until it is that far off (the user, 2026-11-02: "copy games"; before, it switched off
+        // at once). Also asked while the game has just started or loaded (GameState.justStarted, until 2 s after the player presses F),
+        // or a storm loaded near the player would keep the start menu's answer, its camera in another region. Switched off, and the
+        // Magnetic Mist near land, at once as before.
+        private bool UpdateActive(float distance)
+        {
+            if (distance > RegionCheckDistance || GameState.justStarted || GameState.currentlyLoading)
+            {
+                allowedHere = AllowedHere();
+            }
+
+            return IsActive(allowedHere, false);
         }
 
         internal void CustomUpdate()
@@ -626,7 +685,7 @@ namespace BetterStorm
                 transform.Translate(-horizontal * 1.75f, Space.World);
             }
 
-            Storm.active = ShouldBeActive();
+            Storm.active = UpdateActive(distance);
             if (Definition.Kind == StormKind.MagneticMist &&
                 MagneticMistFollow.IsFollowing &&
                 MagneticMistOpenOcean.KnownNearLand)
@@ -664,6 +723,17 @@ namespace BetterStorm
             {
                 RelocateAcrossPlayer(relocationDistance);
             }
+        }
+
+        // A saved place put back on load. The start menu's camera stands far from the latitude line, so a storm with a limit was
+        // parked there; that parking is dropped first, or the first update after the load took the storm across the player to its
+        // line (the user, 2026-11-02: "also i found out gentle snow is not saved"; -bsSnowLoad, run 20261102-185628: put back where
+        // it was saved, then moved 8,016 to 38.05°).
+        internal void PlaceLoaded(Vector3 position)
+        {
+            transform.position = position;
+            latitudeParked = false;
+            EnsureValidInitialPlacement();
         }
 
         internal void SetDebugPosition(Vector3 target)
@@ -709,7 +779,7 @@ namespace BetterStorm
 
             gameObject.SetActive(true);
             EnsureValidInitialPlacement();
-            Storm.active = ShouldBeActive();
+            Storm.active = UpdateActive(float.PositiveInfinity);   // the place's say asked afresh
             oneSecondTimer = 0f;
         }
 
@@ -724,7 +794,7 @@ namespace BetterStorm
         internal void PrepareDebugMove(bool resetLightningCooldown)
         {
             gameObject.SetActive(true);
-            Storm.active = ShouldBeActive();
+            Storm.active = UpdateActive(float.PositiveInfinity);   // the place's say asked afresh
             oneSecondTimer = 0f;
 
             if (resetLightningCooldown && Definition.SupportsLightning)
@@ -821,10 +891,66 @@ namespace BetterStorm
             }
         }
 
-        // the mist's cloud shows whenever it is enabled, like its aurora, also while it is off near land
+        // the mist's cloud shows whenever it is enabled, like its aurora, also while it is off near land, unless "Show Mist Cloud" is
+        // off (§4.2)
         private bool ShowsCloud
         {
-            get { return Storm.active || Definition.Kind == StormKind.MagneticMist; }
+            get { return Definition.Kind == StormKind.MagneticMist ? MistCloudOn : Storm.active; }
+        }
+
+        // the setting "Magnetic Mist" / "Show Mist Cloud" (LOOK_UPDATE_DRAFT.md §4.2; the user, 2026-10-31: "Make magnetic storm cloud
+        // togglable"), read live
+        internal static bool MistCloudOn
+        {
+            get
+            {
+                BetterStormPlugin plugin = BetterStormPlugin.Instance;
+                return plugin == null || plugin.ShowMistCloud == null || plugin.ShowMistCloud.Value;
+            }
+        }
+
+        // "Show Mist Cloud" changed: applied at once, not at the next once-a-second check. Off, the mist's cloud systems (its disc,
+        // ring and the storm's top layer) stop emitting and their puffs go; on, its disc and ring emit again within the sight limit,
+        // filled at once as the game storms' cloud is (StormEye's prewarm). Their renderers follow in MistAurora.LateUpdate, the
+        // aurora's light on the cloud in MistAurora.Animate.
+        internal void ApplyMistCloud()
+        {
+            if (Definition.Kind != StormKind.MagneticMist)
+            {
+                return;
+            }
+
+            bool on = false;
+            if (player != null)
+            {
+                Vector3 horizontal = transform.position - player.position;
+                horizontal.y = 0f;
+                on = ShowsCloud && horizontal.magnitude <= Definition.ParticleDistance;
+            }
+
+            SetParticleEmission(on);
+            if (!MistCloudOn)
+            {
+                topParticles?.Clear(true);
+            }
+
+            foreach (ParticleSystem ps in new[] { bottomParticles, mistCloud })
+            {
+                if (ps == null)
+                {
+                    continue;
+                }
+
+                if (!MistCloudOn)
+                {
+                    ps.Clear(true);
+                }
+                else if (on)
+                {
+                    ps.Simulate(Mathf.Max(1f, ps.main.startLifetime.constantMax), false, false, false);
+                    ps.Play(false);
+                }
+            }
         }
 
         private bool HasLatitudeLimit
@@ -1493,9 +1619,8 @@ namespace BetterStorm
                     return;
                 }
 
-                controller.transform.position =
-                    StormPositionCoordinates.ToRuntimeCoordinates(loadedPosition);
-                controller.EnsureValidInitialPlacement();
+                controller.PlaceLoaded(
+                    StormPositionCoordinates.ToRuntimeCoordinates(loadedPosition));
             }
 
             internal void Reset()
@@ -1571,6 +1696,7 @@ namespace BetterStorm
             RuntimeEffectLifecycle.ShutdownTransientEffects();
             StormPositionPersistence.BeginLoadAll();
             DoldrumsWind.Reset();
+            GentleSnowWind.Reset();
             MagneticMistFollow.BeginLoad();
             MagneticMistOpenOcean.Reset();
         }
@@ -2185,6 +2311,18 @@ namespace BetterStorm
             1f,
             1f);
 
+        // The flakes dimmed at night (LOOK_UPDATE_DRAFT.md §4.5, the user's pick "Snowflakes dim at night"): their material is unlit,
+        // so on a black night they glowed white (probe 24, run 20261031-234354). Its colour from 1 by day down to FlakeNightShade by
+        // night, by the game's night lerp (the share of its night palette in the frame's light); set again only when it moves a step.
+        // Not the ambient light read here: in Update it read 0.15-0.17 at noon where the frame showed 0.6 (run 20261031-235121).
+        // FlakeNightShade 0.15 (decided while the user was away, LOOK_UPDATE_DRAFT.md §9) until the user's pick on probe 26's sheet
+        // (2026-11-01: "Make the snow in night time not that dimmed, give me options"; of 0.15, 0.3, 0.45, 0.6 and 0.8 pictured, run
+        // 20261101-202701: "0.5")
+        private const float FlakeNightShade = 0.5f, FlakeShadeStep = 1f / 64f;
+        private static readonly string[] FlakeColourProperties = { "_TintColor", "_Color", "_EmisColor", "_EmissionColor" };
+        private static Material snowMaterial;
+        private static float flakeShade = -1f;
+
         private static ParticleSystem snowParticles;
         private static bool active;
 
@@ -2221,7 +2359,7 @@ namespace BetterStorm
 
             float emissionRate = MaximumParticles / ParticleLifetime;
             float emissionLerp = GentleSnowRules.GetSnowEmissionLerp(
-                influence.NormalizedDistance);
+                influence.CenterDistance);
             CustomPrecipitationParticles.SetEmissionRate(
                 snowParticles,
                 emissionRate * emissionLerp);
@@ -2248,6 +2386,7 @@ namespace BetterStorm
             velocity.x = Wind.currentWind.x * WindDriftMultiplier;
             velocity.y = -FallSpeed;
             velocity.z = Wind.currentWind.z * WindDriftMultiplier;
+            ShadeFlakes();
 
         }
 
@@ -2255,6 +2394,27 @@ namespace BetterStorm
         {
             CustomPrecipitationParticles.SetEmissionRate(snowParticles, 0f);
             active = false;
+        }
+
+        private static void ShadeFlakes()
+        {
+            if (snowMaterial == null)
+            {
+                return;
+            }
+
+            float shade = Sun.sun != null ? Mathf.Lerp(1f, FlakeNightShade, Sun.sun.GetNightLerp()) : 1f;
+            if (flakeShade >= 0f && Mathf.Abs(shade - flakeShade) < FlakeShadeStep)
+            {
+                return;
+            }
+
+            flakeShade = shade;
+            Color colour = new Color(shade, shade, shade, 1f);
+            foreach (string property in FlakeColourProperties)
+            {
+                SetMaterialColorIfPresent(snowMaterial, property, colour);
+            }
         }
 
         internal static void DeactivateImmediately()
@@ -2424,6 +2584,8 @@ namespace BetterStorm
             SetMaterialColorIfPresent(material, "_EmisColor", Color.white);
             SetMaterialColorIfPresent(material, "_EmissionColor", Color.white);
             renderer.sharedMaterial = material;
+            snowMaterial = material;
+            flakeShade = -1f;   // shaded at the next frame (ShadeFlakes)
 
             SnowParticleResourceOwner resources =
                 owner.AddComponent<SnowParticleResourceOwner>();
@@ -2663,7 +2825,27 @@ namespace BetterStorm
                 return true;
             }
 
-            weather.ChangeWeather(weather.currentRegion.clearWeather);
+            Region region = weather.currentRegion;
+            float overcast = influence.IsGentleSnow ? GentleSnowRules.Overcast(influence.CenterDistance) : 0f;
+            if (overcast > 0f && region.cloudyWeather != null && WeatherStorms.instance != null)
+            {
+                // Gentle Snow's overcast (LOOK_UPDATE_DRAFT.md §4.5): the region's clear weather blended toward its own cloudy one,
+                // the game's "fully cloudy, no rain" set, with the game's own blend (as ApplyStorm and StormEyeWeather do), its
+                // volumetric fog alike; its light lifted toward a light grey by day (GentleSnowLightPatch)
+                ref WeatherSet blended = ref StormAccess.BlendedSet(WeatherStorms.instance);
+                WeatherSet.BlendSets(ref blended, region.clearWeather, region.cloudyWeather, overcast);
+                GentleSnowLightPatch.KeepSea(blended, region, overcast);
+                // Alternative Ocean Color's preset kept on the clear weather's share as KeepSea's sea keeps the region's own (the user's
+                // pick "Built from AOC's sea (Recommended)"): its clear sea x (1 - the overcast x (1 - RegionSea))
+                AlternativeOceanColorLink.Weigh(blended, region.clearWeather, region.cloudyWeather, overcast * (1f - GentleSnowLightPatch.RegionSea));
+                StormEyeWeather.ApplyVolufog(StormEyeWeather.LerpVolufog(region.clearVolufog, region.cloudyVolufog, overcast));
+                weather.ChangeWeather(blended);
+                return false;
+            }
+
+            // the clear weather's volumetric fog too (0.40 applies it only in ApplyStorm, skipped here)
+            StormEyeWeather.ApplyVolufog(region.clearVolufog);
+            weather.ChangeWeather(region.clearWeather);
             return false;
         }
     }
@@ -2705,9 +2887,11 @@ namespace BetterStorm
         })]
         private static void Postfix(ref Vector3 ___currentWindTarget)
         {
+            // from the old edge in (4,500), as before the look update; outside it GentleSnowWind eases the wind
             if (!StormInfluenceService.TryGetCurrent(
                     out StormInfluence influence) ||
-                !influence.IsGentleSnow)
+                !influence.IsGentleSnow ||
+                !GentleSnowRules.InCore(influence.CenterDistance))
             {
                 return;
             }
@@ -2718,7 +2902,1105 @@ namespace BetterStorm
         }
     }
 
-    // The Doldrums (HANDOFF_1.2.0.md §4): a calm, clear area south of 36° N.
+    // Gentle Snow's wind eased in (LOOK_UPDATE_DRAFT.md §4.5; the user, 2026-10-31: "Make wind graduately slow down from 8000 to
+    // 4500, then at 4500 original rules apply for gentle snow."): from its outer edge (8,000) to its old one (4,500) the target from
+    // the one the game and every other mod rolled toward the snow's (the base wind, at most 18) by WindEase, set every frame and after
+    // every roll; the base wind (saved with the game) never written; Wind Totem's orb keeps its own wind. As DoldrumsWind eases High
+    // Pressure's. From 4,500 in, the rules from before the look update (GentleSnowWindTargetPatch, WindOverrideState).
+    internal static class GentleSnowWind
+    {
+        private static bool active;
+        private static bool inCore;            // within the old edge (4,500) at the last look
+        private static Vector3 normalTarget;   // the target as the game and every other mod rolled it
+
+        internal static void Tick()
+        {
+            Wind wind = Wind.instance;
+            if (wind == null)
+            {
+                Reset();
+                return;
+            }
+
+            bool fromCore = inCore;
+            if (!InBand(out float ease))
+            {
+                if (active)
+                {
+                    Exit(wind);
+                }
+                return;
+            }
+
+            if (!active)
+            {
+                active = true;
+                normalTarget = DoldrumsWind.WindTarget(wind);
+                if (fromCore)
+                {
+                    // out of the old edge the target is still the snow's (the base wind, at most 18), not one the game rolled, so the
+                    // wind stayed that calm until the game's next roll (every 20-80 s) before the ease took it back up: rolled next frame
+                    StormAccess.WindTimer(wind) = 0f;
+                }
+            }
+
+            Apply(wind, ease);
+        }
+
+        // SetNewWindTarget postfix, after every other mod
+        internal static void AfterRoll(Wind wind)
+        {
+            if (!active || !InBand(out float ease))
+            {
+                return;
+            }
+
+            normalTarget = DoldrumsWind.WindTarget(wind);
+            Apply(wind, ease);
+            // a gust a postfix before this one rolled from the unrolled target, rolled again (StormGustPatch)
+            DoldrumsWind.SetNewGustTarget?.Invoke(wind, null);
+        }
+
+        internal static void Reset()
+        {
+            active = false;
+        }
+
+        internal static void RestoreImmediately()
+        {
+            Wind wind = Wind.instance;
+            if (active && wind != null)
+            {
+                Exit(wind);
+            }
+
+            Reset();
+        }
+
+        private static bool InBand(out float ease)
+        {
+            bool snow = StormInfluenceService.TryGetCurrent(out StormInfluence influence) && influence.IsGentleSnow;
+            inCore = snow && GentleSnowRules.InCore(influence.CenterDistance);
+            bool inBand = snow && !inCore;
+            ease = inBand ? GentleSnowRules.WindEase(influence.CenterDistance) : 0f;
+            return inBand;
+        }
+
+        private static void Apply(Wind wind, float ease)
+        {
+            DoldrumsWind.WindTarget(wind) = WindTotemCompatibility.OrbControlsWind
+                ? normalTarget
+                : Vector3.Lerp(normalTarget, Vector3.ClampMagnitude(Wind.currentBaseWind, GentleSnowRules.MaximumWindTarget), ease);
+        }
+
+        private static void Exit(Wind wind)
+        {
+            DoldrumsWind.WindTarget(wind) = normalTarget;
+            StormAccess.WindTimer(wind) = 0f;   // the game rolls a fresh target next frame (from 4,500 in, the snow's)
+            Reset();
+        }
+    }
+
+    [HarmonyPatch(typeof(Wind), "SetNewWindTarget")]
+    internal static class GentleSnowBandWindTargetPatch
+    {
+        [HarmonyPostfix]
+        [HarmonyPriority(Priority.Last)]
+        [HarmonyAfter(new[]
+        {
+            BetterStormPlugin.ClimateGuid,
+            BetterStormPlugin.ChaoticWindGuid,
+            BetterStormPlugin.WindTotemGuid
+        })]
+        private static void Postfix(Wind __instance)
+        {
+            GentleSnowWind.AfterRoll(__instance);
+        }
+    }
+
+    // Gentle Snow's light-grey light (LOOK_UPDATE_DRAFT.md §4.5; the user, 2026-10-31: "Make gentle snow more close to real life
+    // gentle snow: white/light gray ambient inside the snowing area, still no visible cloud from outside of gentle snow. If light fog
+    // help with the ambient, add it."). Its weather is the region's clear one blended toward its cloudy one (GentleSnowClearWeatherPatch),
+    // a mid grey with dark clouds and a warm sky (ambient 0.42, the clouds 0.26, the sky's tint (1, 0.79, 0.53)), so by day the frame's
+    // final palette is lifted toward a light neutral grey by the overcast x Lift: the ambient toward AmbientGrey, the fog colour toward
+    // FogGrey, the water toward WaterGrey (the low cloud layer thinned out: WeatherSkyModifiers), each colour's alpha kept. Not the
+    // sky's tint: lifted toward a neutral grey the game's sky showed blue between the clouds, where the cloudy weather's warm tint
+    // draws them white-grey (probe 24, run 20261031-234354; decided while the user was away, LOOK_UPDATE_DRAFT.md §9); since the user's
+    // picks on probes 26 to 26c the white balance cooled to -4 and the sky's tint and the fog warmed to keep the sky white, on probe
+    // 26d's the sea's colours warmed back to keep the sea as before (and GentleSnowSeaMaterialPatch), on probe 26e's the sea's
+    // colours and the tint Al'Ankh's in every region, and on probe 26f's the sea outside Al'Ankh's waters half way back to the region's
+    // own, with Al'Ankh's white balance (KeepSea); in Alternative Ocean Color's waters its white balance, tint and sea followed
+    // (AlternativeOceanColorLink, FollowCooling; the user's picks of 2026-11-02, probe 26h). A prefix after AOC's: the
+    // palette is rebuilt from the blend every frame, so nothing adds up, and Climate's fog and Dizzy Gamma's brightening still come
+    // after it. At night the game takes every colour from its one night palette: nothing lifted.
+    [HarmonyPatch(typeof(Weather), "ApplyWeather")]
+    internal static class GentleSnowLightPatch
+    {
+        // how far toward the light grey: the draft's full lift, of 0 (the game's cloudy weather as it is), 0.5 and 1 pictured by probe
+        // 24 (run 20261031-235410: with the sky's tint left as the weather's, the three differ mostly in the light on the ship and sea
+        // and the clouds' grey; decided while the user was away, LOOK_UPDATE_DRAFT.md §9 D4)
+        internal const float Lift = 1f;
+        private static readonly Color AmbientGrey = new Color(0.6f, 0.6f, 0.6f), FogGrey = new Color(0.8f, 0.8f, 0.8f);
+        private static readonly Color WaterGrey = new Color(0.2f, 0.24f, 0.28f);
+        // the share of the overcast's change the sea takes (the user, 2026-11-01: "also the sea is too gray, it should retain some of it's
+        // color"): its colours (water, surface, scattering, specular) blended from the clear weather's toward the cloudy one's by the
+        // overcast x SeaShare (KeepSea), and the water's lift toward WaterGrey x SeaShare; 1 was 2FBBD021's. The water's lift alone did
+        // not change the drawn sea (probe 25, run 20261101-072252: 333D47 to 00111D, the same tones). The user's pick on probe 25d's
+        // sheet (1, 0.67, 0.33, 0 offered; run 20261101-075309), 2026-11-01: "1/4 gray"
+        internal const float SeaShare = 0.25f;
+        // the low cloud layer (about 110 up) seen far off (the user, 2026-11-01: "the main point is that i want the low cloud when see
+        // from far not so obvious, more like a shade of differnt gray, i'm fine with the color of low cloud when you look up, make cloud
+        // more layed"): its puffs' alpha by how high each stands in the sky from the view, 1 from LowFadeHigh degrees up, LowFarAlpha
+        // from LowFadeLow down, by the overcast (WeatherSkyModifiers.FadeFarLowClouds). The layer's puffs are 800-2,400 across, 170-660
+        // above the view and 1.5-4.7 km off (probe 25g, run 20261101-095716), so a fade by distance alone (2,456 to 4,316) left the dark
+        // ones in the lower sky as they were; their alpha does reach the picture (0.3: the puffs' contrast 25.7 to 7.1), their tone can't
+        // (probes 25c and 25e, BetterStorm_FAILED.md). The user's pick on probe 25i's sheet (half or a quarter of the layer, with the
+        // medium fade, full from 25 degrees and 0.25 from 12 down, or this strong one; run 20261101-102343), 2026-11-01: "2 Half, strong
+        // (Recommended)"
+        internal const float LowFadeHigh = 30f, LowFadeLow = 15f, LowFarAlpha = 0.1f;
+        // the share of the low cloud layer's puffs made under the full overcast (the user, 2026-11-01, on probe 25h's sheet: "i still want
+        // the lower cloud to be overall fewer, please show me half and quater with medium and strong fading"): its rate x Lerp(1, this,
+        // the overcast), the puffs already up faded out as High Pressure fades its own (as in 9180E4F6, probe 25d: 199 / 55 / 16 live at
+        // 1 / 0.5 / 0.25). The user's pick on probe 25i's sheet, as above (34 live at 3,000 against about 200 with the whole layer)
+        internal const float LowerClouds = 0.5f;
+        // the white balance (the palette's colour-grading temperature: below 0 bluer, above 0 yellower) taken toward this by the same
+        // share as the light. The region's cloudy weather sets it (level24's sets, by day: Medi +30 against its clear +12, Emerald +20
+        // against +30.4, Al'Ankh +10 against +10; the game's coldest, the lagoon's cold-fog rain, -2.3), so with the cloudy sky's warm
+        // tint (EDC694 at the full overcast, probe 24's run 20261101-103949) the overcast read yellow-grey by day (the user, 2026-11-01:
+        // "Make the area inside gentle snow be colder color, now it's a bit yellow-gray in day time, give me some options"; on probe
+        // 26's sheet, of +10 (as built there), 0, -15, -30 and -15 with a cool sky: "anything between 2 and 3?", 0 and -15; on probe
+        // 26b's of 0, -4, -8, -12 and -15: "2, but i still want sky to be white, at 2 it start looks blue")
+        internal const float Temperature = -4f;
+        // the sky kept white under that cooler white balance: the colour grading cools the whole frame, the sky with it (at -4 the
+        // horizon's red - blue -1 to -9, run 20261101-203501), so the sky's own colours are warmed back by the same share: the fog colour
+        // (the far low clouds and the horizon are drawn in it) x (1 + FogWarm, 1, 1 - FogWarm) and the procedural sky's tint x
+        // (1 + SkyWarm, 1, 1 - SkyWarm). The user's pick on probe 26c's sheet (run 20261101-204132: the horizon's red - blue -4.4, -8.6
+        // without, -2.3 at the white balance 0; the fog alone hardly moved it at a fog of 0.003), 2026-11-01: "4 Fog+sky warmer
+        // (Recommended)"
+        internal const float FogWarm = 0.04f, SkyWarm = 0.12f;
+        // the sea kept as it was before that cooler white balance (the user, 2026-11-01: "one more change, for gentle snow, please don't
+        // apply colder color to sea color, it should be like previous version"; the previous version 6B233C6A, the white balance the
+        // weather's): the colour grading cools the whole frame, so the sea's own colours (water, surface, scattering) are warmed back by
+        // the shift it makes, each channel x (1 + SeaBack x the shift x SeaWarm), the shift the weather's white balance minus the one
+        // drawn. SeaBack is the colour grading's own shift for a grey per unit of white balance (PostProcessing's
+        // ColorGradingComponent.CalculateColorBalance, its shader's LMS matrices, applied in ACEScg), in the colours' gamma space (the game
+        // draws in linear space), fitted at a shift of 24: within 1 % of the exact undo from +10 to +30 (Al'Ankh's to Medi's cloudy
+        // weather). It predicts the cooling measured on the near sea from +10 to -4 (red x 0.92, blue x 1.09; probe 26d, run
+        // 20261101-214718). The sea material's colours the palette doesn't set take the same warm-back (GentleSnowSeaMaterialPatch, by
+        // SeaMaterialShift).
+        private static readonly Vector3 SeaBack = new Vector3(0.00457f, -0.00056f, -0.00545f);
+        // how much of that warm-back: x 1 undoes the cooling on the sea's own colours, but a neutral part of the sea's drawn tone (a
+        // quarter to a half, the same with the fog off) comes from none of them, so x 1 left about 60 % of the cooling (probe 26d, run
+        // 20261101-215658). The user's pick on probe 26d's sheet (x 1.6, 2.2, 2.8 offered; run 20261101-220337: at x 2.2 the sea's
+        // red - blue within 6 of the first build's at 0.5-2, 2-6 and 12-26 degrees down, about 5 % darker near the boat), 2026-11-01:
+        // "3 x2.2 (Recommended)"
+        internal const float SeaWarm = 2.2f;
+        // the warmest weather white balance the sea is warmed back from: the shift is (the weather's, at most this, - Temperature) x
+        // the light's share. The user picked x 2.2 in waters of +10 (Al'Ankh's cloudy weather); from Emerald's +20 or Medi's +30 the
+        // whole shift x 2.2 took the sea's blue down to 0.59 and drew it olive green (the user, 2026-11-01: "my sea color looks green
+        // instead of the one you showing ... i don't have alternative ocean color on btw"). The drawn white balance is -4 everywhere,
+        // so the sea's look as pictured needs the same warm-back everywhere (with Al'Ankh's sea and tint, KeepSea: the user's pick
+        // on probe 26e's sheet, 2026-11-01, "3 Sea + tint (Recommended)")
+        internal const float SeaReference = 10f;
+        // the sea material's warm-back this frame, in white balance units (0 outside Gentle Snow's daytime overcast)
+        internal static float SeaMaterialShift;
+        private static readonly int SkyTintId = Shader.PropertyToID("_SkyTint");
+
+        // the share of the way to the light grey now: the overcast, by day, x Lift
+        internal static float Amount()
+        {
+            if (Lift <= 0f || !StormInfluenceService.TryGetCurrent(out StormInfluence influence) || !influence.IsGentleSnow)
+            {
+                return 0f;
+            }
+
+            float day = Sun.sun != null ? 1f - Sun.sun.GetNightLerp() : 1f;
+            return GentleSnowRules.Overcast(influence.CenterDistance) * day * Lift;
+        }
+
+        // Gentle Snow's overcast here (0 outside it), by day and night alike
+        internal static float Overcast()
+        {
+            return StormInfluenceService.TryGetCurrent(out StormInfluence influence) && influence.IsGentleSnow ? GentleSnowRules.Overcast(influence.CenterDistance) : 0f;
+        }
+
+        // Al'Ankh's weather's white balance by day, clear and cloudy alike (level24): the cooling Gentle Snow brings there, to
+        // Temperature, is the one Alternative Ocean Color's waters follow (FollowCooling)
+        internal const float AlankhWhiteBalance = 10f;
+
+        [HarmonyPrefix]
+        [HarmonyAfter("DogEggz.AlternativeEmeraldSea")]
+        private static void Prefix(ref OceanColorPalette ___finalPalette)
+        {
+            SeaMaterialShift = 0f;
+            float overcast = Overcast();
+            if (overcast > 0f)
+            {
+                GentleSnowBefore.Refresh();
+            }
+
+            float t = Amount();
+            if (t <= 0f)
+            {
+                return;
+            }
+
+            ___finalPalette.ambientColor = Toward(___finalPalette.ambientColor, AmbientGrey, t);
+            ___finalPalette.fog = Toward(___finalPalette.fog, FogGrey, t);
+            ___finalPalette.waterColor = Toward(___finalPalette.waterColor, WaterGrey, t * SeaShare);
+            // In Alternative Ocean Color's waters (GentleSnowBefore.Share of the clear weather, by day) the white balance is AOC's cooled as
+            // Al'Ankh's waters are (FollowCooling), the tint AOC's moved as Al'Ankh's moves, and the sea's and sky's warm-back follow that
+            // cooling: the white point moves by t of Al'Ankh's full move, so they warm back by t as without AOC. AOC's preset counts on the
+            // weather at w (KeepSea's AlternativeOceanColorLink.Weigh), so the weather's own white balance and tint are the palette's less
+            // w x AOC's offset. Without AOC, as before.
+            float share = GentleSnowBefore.Share, w = 1f - overcast * (1f - RegionSea);
+            float weatherTemperature = ___finalPalette.temperature - w * GentleSnowBefore.AocTemperature;
+            ___finalPalette.temperature = Mathf.Lerp(Mathf.Lerp(weatherTemperature, Temperature, t), FollowCooling(GentleSnowBefore.Temperature, t), share);
+            if (share > 0f)
+            {
+                float weatherTint = ___finalPalette.tint - w * GentleSnowBefore.AocTint;
+                ___finalPalette.tint = Mathf.Lerp(weatherTint, GentleSnowBefore.Tint + overcast * AlankhTintChange(), share);
+            }
+
+            float shift = (Mathf.Lerp(Mathf.Min(weatherTemperature, SeaReference), AlankhWhiteBalance, share) - Temperature) * t;
+            ___finalPalette.waterColor = WarmBack(___finalPalette.waterColor, shift * SeaWarm);
+            ___finalPalette.surfaceColor = WarmBack(___finalPalette.surfaceColor, shift * SeaWarm);
+            ___finalPalette.scatteringColor = WarmBack(___finalPalette.scatteringColor, shift * SeaWarm);
+            SeaMaterialShift = shift * SeaWarm;
+            Color fog = ___finalPalette.fog;
+            ___finalPalette.fog = new Color(fog.r * (1f + FogWarm * t), fog.g, fog.b * (1f - FogWarm * t), fog.a);
+            Material sky = ___finalPalette.skyMaterial;
+            if (sky != null && sky.HasProperty(SkyTintId))
+            {
+                Color tint = sky.GetColor(SkyTintId);
+                sky.SetColor(SkyTintId, new Color(tint.r * (1f + SkyWarm * t), tint.g, tint.b * (1f - SkyWarm * t), tint.a));
+            }
+        }
+
+        // the colour grading's white point, its CIE x, for a white balance (ColorGradingComponent.CalculateColorBalance), and back
+        internal static float WhitePoint(float temperature) => 0.31271f - temperature / 55f * (temperature < 0f ? 0.1f : 0.05f);
+
+        internal static float FromWhitePoint(float x) => x <= 0.31271f ? (0.31271f - x) / 0.05f * 55f : -(x - 0.31271f) / 0.1f * 55f;
+
+        // the white balance Gentle Snow draws from Alternative Ocean Color's `before` at the light's share `t`: the colour grading's
+        // white point moved by t of Al'Ankh's waters' move (+10 to -4), so the same visible cooling (Winter Aestrin's -10 to about -19,
+        // Open Chronos Ocean's 0 to about -9), not the same 14 units (-10 to -24, about 1.6 times as cold, the sky near the horizon light
+        // blue), since PostProcessing v1 moves the white point twice as far per unit below 0 as above it. The user's pick on probe 26h's
+        // sheet (run 20261102-180132), 2026-11-02: "C Same look as Al'Ankh (Recommended)"
+        internal static float FollowCooling(float before, float t)
+        {
+            return FromWhitePoint(WhitePoint(before) + t * (WhitePoint(Temperature) - WhitePoint(AlankhWhiteBalance)));
+        }
+
+        // Al'Ankh's tint change from its clear weather to its cloudy one by day (5 to 5.66), 0 while its region is not found
+        private static float AlankhTintChange()
+        {
+            Region region = AlankhRegion();
+            return region != null && region.clearWeather != null && region.cloudyWeather != null
+                ? region.cloudyWeather.dayPalette.tint - region.clearWeather.dayPalette.tint : 0f;
+        }
+
+        // `colour` warmed back from a white balance `shift` units cooler (SeaBack), its own alpha kept
+        internal static Color WarmBack(Color colour, float shift)
+        {
+            return new Color(colour.r * (1f + SeaBack.x * shift), colour.g * (1f + SeaBack.y * shift), colour.b * (1f + SeaBack.z * shift),
+                colour.a);
+        }
+
+        // `colour` `t` of the way to `grey`, its own alpha kept
+        internal static Color Toward(Color colour, Color grey, float t)
+        {
+            Color lifted = Color.Lerp(colour, grey, t);
+            lifted.a = colour.a;
+            return lifted;
+        }
+
+        // the sea Gentle Snow brings the same in every region (the user, 2026-11-01: "in both aestrin and al'ankh region it should look
+        // the same"): Al'Ankh's sea colours, as pictured on probe 26d's sheet (Aestrin's are greyer and greener: water 798687, scattering
+        // 525A4F against 38758B and 3F918E; probe 26e, run 20261101-224346), and its colour grading's tint (below 0 greener, above 0
+        // more magenta): the game blends the region's clear tint toward its cloudy one by the overcast, and those differ by region
+        // (level24's day tints: Al'Ankh's clear 5, cloudy 5.66; Medi's 5 and 0; Emerald's -5 and -9.6). With both, Aestrin's sea under
+        // the full overcast drew within about 1 of Al'Ankh's far off and at mid distance (the near water's gap was the waves' state;
+        // probe 26e, run 20261101-233342). The user's pick on probe 26e's sheet (Al'Ankh's sea alone, or with its tint), 2026-11-01:
+        // "3 Sea + tint (Recommended)"; outside Al'Ankh's waters since probe 26f half way back to the region's own sea (RegionSea)
+        private static Region alankh;
+        private static int nextAlankhSearch;
+
+        // the sea Gentle Snow brings outside Al'Ankh's waters (the user, 2026-11-02: "in aestrin the transition from normal sea color to
+        // snow color looks too weird, need to make another sea color that is reasonable but not yellow like previous version", "btw i want
+        // to keep the current color as al'ankh sea's color"): Al'Ankh's snow sea (its clear sea SeaShare of the way to its cloudy one)
+        // brought RegionSea of the way back toward the region's own clear sea, each colour Al'Ankh's snow sea + RegionSea x (the region's
+        // clear sea - Al'Ankh's clear sea). Aestrin's normal sea is drawn from a dark grey-teal scattering (2D4346; Al'Ankh's 178DAB, every
+        // region's cloudy sea the same light grey), so with Al'Ankh's sea alone it turned teal and brighter under the grey overcast (mid
+        // distance +11 to +19, probe 26f, run 20261102-002338); half way it stays within about 5 of Aestrin's normal sea at mid distance at
+        // every step in, a grey with a little blue at the full overcast (run 20261102-003042). In Al'Ankh's waters Al'Ankh's. With the white
+        // balance below (KeepSea), the user's pick on probe 26f's sheet (half way, Aestrin's own or today's sea, each with that white
+        // balance, or half way without it), 2026-11-02: "3 Half way + cool (Recommended)"
+        internal const float RegionSea = 0.5f;
+
+        // Gentle Snow's blended weather (GentleSnowClearWeatherPatch) with its sea's colours from the region's clear weather's toward the
+        // sea Gentle Snow brings (Snow), by the overcast (in Al'Ankh's waters: overcast x SeaShare of the way from the clear weather's to
+        // the cloudy one's), its tint Al'Ankh's clear one's toward its cloudy one's, and its white balance the region's clear one's toward
+        // Al'Ankh's cloudy one's (+10 by day), both by the overcast (the game's blend in Al'Ankh's waters), by day and at dawn (the night
+        // palette is the game's one). The white balance: the region's cloudy one is warmer elsewhere (Medi's +30), so the white balance
+        // drawn (Lerp of the weather's toward Temperature by the light's share) was still 8.5 half way in, where Al'Ankh's waters draw 3,
+        // while the sea's and sky's warm-back (SeaReference, SkyWarm, FogWarm) follow Al'Ankh's cooling: the sea and the sky passed through
+        // a warm, olive-brown stage half way in (probe 26f, BetterStorm_FAILED.md); toward Al'Ankh's cloudy one they cool as in Al'Ankh's
+        // waters, the same at the full overcast
+        internal static void KeepSea(WeatherSet blended, Region region, float overcast)
+        {
+            Region alankhRegion = AlankhRegion();
+            bool found = alankhRegion != null && alankhRegion.clearWeather != null && alankhRegion.cloudyWeather != null;
+            Region sea = found ? alankhRegion : region;
+            Sea(ref blended.dayPalette, region.clearWeather.dayPalette, sea.clearWeather.dayPalette, sea.cloudyWeather.dayPalette, overcast);
+            Sea(ref blended.dawnPalette, region.clearWeather.dawnPalette, sea.clearWeather.dawnPalette, sea.cloudyWeather.dawnPalette, overcast);
+            if (found)
+            {
+                blended.dayPalette.tint = Mathf.Lerp(alankhRegion.clearWeather.dayPalette.tint, alankhRegion.cloudyWeather.dayPalette.tint, overcast);
+                blended.dawnPalette.tint = Mathf.Lerp(alankhRegion.clearWeather.dawnPalette.tint, alankhRegion.cloudyWeather.dawnPalette.tint, overcast);
+                blended.dayPalette.temperature = Mathf.Lerp(region.clearWeather.dayPalette.temperature, alankhRegion.cloudyWeather.dayPalette.temperature, overcast);
+                blended.dawnPalette.temperature = Mathf.Lerp(region.clearWeather.dawnPalette.temperature, alankhRegion.cloudyWeather.dawnPalette.temperature, overcast);
+            }
+        }
+
+        private static void Sea(ref OceanColorPalette palette, OceanColorPalette own, OceanColorPalette clear, OceanColorPalette cloudy, float overcast)
+        {
+            palette.waterColor = Color.Lerp(own.waterColor, Snow(own.waterColor, clear.waterColor, cloudy.waterColor), overcast);
+            palette.surfaceColor = Color.Lerp(own.surfaceColor, Snow(own.surfaceColor, clear.surfaceColor, cloudy.surfaceColor), overcast);
+            palette.scatteringColor = Color.Lerp(own.scatteringColor, Snow(own.scatteringColor, clear.scatteringColor, cloudy.scatteringColor), overcast);
+            palette.oceanSpecular = Mathf.Lerp(own.oceanSpecular, Snow(own.oceanSpecular, clear.oceanSpecular, cloudy.oceanSpecular), overcast);
+        }
+
+        // one colour of the sea Gentle Snow brings (RegionSea); in Al'Ankh's waters (own the same as clear) Al'Ankh's snow sea
+        private static Color Snow(Color own, Color clear, Color cloudy) => Color.Lerp(clear, cloudy, SeaShare) + RegionSea * (own - clear);
+
+        private static float Snow(float own, float clear, float cloudy) => Mathf.Lerp(clear, cloudy, SeaShare) + RegionSea * (own - clear);
+
+        // the game's Al'Ankh region: its port region, and its trigger (every one of the game's regions has one, Region.OnTriggerEnter).
+        // BorderExpander's latitude bands copy its weather under PortRegion.none, and its "Region blend cache", without a trigger, copies
+        // its source's port region while it holds the weather being blended in (Medi's in Aestrin's waters, found first and kept: probe
+        // 26e, run 20261101-231655). Searched at most every 600 frames while not found
+        private static Region AlankhRegion()
+        {
+            if (alankh == null && Time.frameCount >= nextAlankhSearch)
+            {
+                nextAlankhSearch = Time.frameCount + 600;
+                foreach (Region candidate in UnityEngine.Object.FindObjectsOfType<Region>())
+                {
+                    if (candidate.portRegion == PortRegion.alankh && candidate.GetComponent<Collider>() != null)
+                    {
+                        alankh = candidate;
+                        break;
+                    }
+                }
+            }
+
+            return alankh;
+        }
+    }
+
+    // Alternative Ocean Color (GUID DogEggz.AlternativeEmeraldSea, the user's mod; 1.2.x) read by reflection, its types being internal:
+    // its preset's change to the clear weather here, and its weight on Gentle Snow's blended weather, so that Gentle Snow follows it (the
+    // user, 2026-11-02: "when alternative ocean color is on every things based on it's color temperature and adjust from there"; their
+    // picks in LOOK_UPDATE_DRAFT.md §1). AOC keeps a contribution per weather set (PaletteRegistry: each region's clear-weather share,
+    // Emerald, Aestrin and Chronos) and replaces that share of the palette with its preset by day (Plugin.ApplyPalette). Without AOC, or
+    // when a member is missing (a warning once), nothing changes.
+    internal static class AlternativeOceanColorLink
+    {
+        private static bool searched, broken;
+        private static PropertyInfo instance, active;
+        private static PropertyInfo[] presets;   // the presets of Emerald (SelectedPreset), Aestrin and Chronos
+        private static FieldInfo[] parts;        // RegionalContribution's Emerald, Aestrin and Chronos
+        private static MethodInfo apply, get, set, blend;
+        private static FieldInfo contribution, dayWeight, weight;
+        private static readonly object[] OneArg = new object[1], TwoArgs = new object[2], ThreeArgs = new object[3], FourArgs = new object[4];
+
+        private static bool Ready()
+        {
+            if (searched)
+            {
+                return !broken;
+            }
+
+            searched = true;
+            Type plugin = AccessTools.TypeByName("AlternativeEmeraldSea.Plugin");
+            Type registry = AccessTools.TypeByName("AlternativeEmeraldSea.PaletteRegistry");
+            Type regional = AccessTools.TypeByName("AlternativeEmeraldSea.RegionalContribution");
+            Type part = AccessTools.TypeByName("AlternativeEmeraldSea.PaletteContribution");
+            if (plugin == null || registry == null || regional == null || part == null)
+            {
+                broken = true;   // not installed
+                return false;
+            }
+
+            instance = AccessTools.Property(plugin, "Instance");
+            active = AccessTools.Property(plugin, "Active");
+            presets = new[] { AccessTools.Property(plugin, "SelectedPreset"), AccessTools.Property(plugin, "AestrinPreset"), AccessTools.Property(plugin, "ChronosPreset") };
+            parts = new[] { AccessTools.Field(regional, "Emerald"), AccessTools.Field(regional, "Aestrin"), AccessTools.Field(regional, "Chronos") };
+            apply = AccessTools.Method(plugin, "ApplyPalette");
+            get = AccessTools.Method(registry, "Get");
+            set = AccessTools.Method(registry, "Set");
+            blend = AccessTools.Method(regional, "Blend");
+            contribution = AccessTools.Field(plugin, "contribution");
+            dayWeight = AccessTools.Field(plugin, "dayWeight");
+            weight = AccessTools.Field(part, "Weight");
+            broken = instance == null || active == null || Array.IndexOf(presets, null) >= 0 || Array.IndexOf(parts, null) >= 0 || apply == null ||
+                get == null || set == null || blend == null || contribution == null || dayWeight == null || weight == null;
+            if (broken)
+            {
+                BetterStormPlugin.Instance?.LogFeatureWarning("Gentle Snow: Alternative Ocean Color " + plugin.Assembly.GetName().Version +
+                    " is not the 1.2 Better Storm reads; Gentle Snow does not follow its colours.");
+            }
+
+            return !broken;
+        }
+
+        private static void Fail(Exception e)
+        {
+            broken = true;
+            BetterStormPlugin.Instance?.LogFeatureWarning("Gentle Snow stopped following Alternative Ocean Color: " + e.GetType().Name + ": " + e.Message);
+        }
+
+        // Gentle Snow's blended weather given AOC's preset at the clear weather's share x (1 - `lerp`) (KeepSea), as the game's blend of
+        // the clear and cloudy weathers at `lerp` would give it (AOC's own BlendSets postfix gives it at the overcast)
+        internal static void Weigh(WeatherSet blended, WeatherSet clear, WeatherSet cloudy, float lerp)
+        {
+            if (blended == null || !Ready())
+            {
+                return;
+            }
+
+            try
+            {
+                OneArg[0] = clear;
+                ThreeArgs[0] = get.Invoke(null, OneArg);
+                OneArg[0] = cloudy;
+                ThreeArgs[1] = get.Invoke(null, OneArg);
+                ThreeArgs[2] = lerp;
+                TwoArgs[0] = blended;
+                TwoArgs[1] = blend.Invoke(null, ThreeArgs);
+                set.Invoke(null, TwoArgs);
+            }
+            catch (Exception e)
+            {
+                Fail(e);
+            }
+            finally
+            {
+                OneArg[0] = null;
+                Array.Clear(TwoArgs, 0, 2);
+                Array.Clear(ThreeArgs, 0, 3);
+            }
+        }
+
+        // `palette` (the clear weather's here at this time of day) as AOC draws it, and the share of the clear weather AOC's presets
+        // change, by day (AOC changes the white balance and tint by day only): 0 without AOC or where none of its presets applies.
+        // AOC's ApplyPalette also sets the two fields its material postfix reads later this frame: put back as found.
+        internal static float Clear(WeatherSet clear, ref OceanColorPalette palette, float dawn, float night)
+        {
+            if (clear == null || !Ready())
+            {
+                return 0f;
+            }
+
+            try
+            {
+                object current = instance.GetValue(null, null);
+                if (current == null || !(bool)active.GetValue(current, null))
+                {
+                    return 0f;
+                }
+
+                OneArg[0] = clear;
+                object source = get.Invoke(null, OneArg);
+                float share = 0f;
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    if (presets[i].GetValue(current, null) != null)
+                    {
+                        share += (float)weight.GetValue(parts[i].GetValue(source));
+                    }
+                }
+
+                if (share <= 0f)
+                {
+                    return 0f;
+                }
+
+                object contribution0 = contribution.GetValue(current), dayWeight0 = dayWeight.GetValue(current);
+                FourArgs[0] = palette;
+                FourArgs[1] = source;
+                FourArgs[2] = dawn;
+                FourArgs[3] = night;
+                apply.Invoke(current, FourArgs);
+                palette = (OceanColorPalette)FourArgs[0];
+                contribution.SetValue(current, contribution0);
+                dayWeight.SetValue(current, dayWeight0);
+                return Mathf.Clamp01(share) * (1f - Mathf.Clamp01(dawn)) * (1f - Mathf.Clamp01(night));
+            }
+            catch (Exception e)
+            {
+                Fail(e);
+                return 0f;
+            }
+            finally
+            {
+                OneArg[0] = null;
+                Array.Clear(FourArgs, 0, 4);
+            }
+        }
+    }
+
+    // The clear weather's look here and now, the look before Gentle Snow (the user, 2026-11-02: "i want the hull to look like exactly
+    // before you enter gentle snow"; with Alternative Ocean Color "every things based on it's color temperature and adjust from there"):
+    // the region's clear weather's palette at this time of day as the game takes it (WeatherSet.GetPalette's day-to-dawn blend, then
+    // Weather.UpdateWeather's night blend), with AOC's preset as AOC draws it (AlternativeOceanColorLink.Clear). Refreshed four times a
+    // second from GentleSnowLightPatch's prefix while Gentle Snow's overcast is here (AOC is read by reflection); read by the light patch
+    // and GentleSnowBoats.
+    internal static class GentleSnowBefore
+    {
+        internal static bool Valid;
+        internal static float Temperature, Tint;          // the white balance and tint, with AOC's preset
+        internal static float AocTemperature, AocTint;    // AOC's change of them (0 without AOC)
+        internal static float Share;                      // the share of the clear weather AOC's presets change, by day
+        internal static Color SunColor;                   // the sun's colour (the palette's, as the game sets the sun's light)
+        private static float next;
+        private static readonly AccessTools.FieldRef<Weather, OceanColorPalette> NightPalette = AccessTools.FieldRefAccess<Weather, OceanColorPalette>("nightPalette");
+
+        internal static void Refresh()
+        {
+            if (Time.unscaledTime < next)
+            {
+                return;
+            }
+
+            next = Time.unscaledTime + 0.25f;
+            Weather weather = Weather.instance;
+            Region region = weather != null ? weather.currentRegion : null;
+            if (region == null || region.clearWeather == null || Sun.sun == null)
+            {
+                Valid = false;
+                Share = AocTemperature = AocTint = 0f;
+                return;
+            }
+
+            float dawn = Sun.sun.GetDawnLerp(), night = Sun.sun.GetNightLerp();
+            OceanColorPalette day = region.clearWeather.dayPalette, dusk = region.clearWeather.dawnPalette, dark = NightPalette(weather);
+            var palette = new OceanColorPalette
+            {
+                waterColor = Color.Lerp(Color.Lerp(day.waterColor, dusk.waterColor, dawn), dark.waterColor, night),
+                surfaceColor = Color.Lerp(Color.Lerp(day.surfaceColor, dusk.surfaceColor, dawn), dark.surfaceColor, night),
+                scatteringColor = Color.Lerp(Color.Lerp(day.scatteringColor, dusk.scatteringColor, dawn), dark.scatteringColor, night),
+                fog = Color.Lerp(Color.Lerp(day.fog, dusk.fog, dawn), dark.fog, night),
+                oceanSpecular = Mathf.Lerp(Mathf.Lerp(day.oceanSpecular, dusk.oceanSpecular, dawn), dark.oceanSpecular, night),
+                sunColor = Color.Lerp(Color.Lerp(day.sunColor, dusk.sunColor, dawn), dark.sunColor, night),
+                temperature = Mathf.Lerp(Mathf.Lerp(day.temperature, dusk.temperature, dawn), dark.temperature, night),
+                tint = Mathf.Lerp(Mathf.Lerp(day.tint, dusk.tint, dawn), dark.tint, night)
+            };
+            float own = palette.temperature, ownTint = palette.tint;
+            Share = AlternativeOceanColorLink.Clear(region.clearWeather, ref palette, dawn, night);
+            Temperature = palette.temperature;
+            Tint = palette.tint;
+            AocTemperature = Temperature - own;
+            AocTint = Tint - ownTint;
+            SunColor = palette.sunColor;
+            Valid = true;
+        }
+    }
+
+    // Gentle Snow's boats drawn as before it (the user, 2026-11-02: "i want the hull to look like exactly before you enter gentle snow",
+    // and the pick "The whole boat (Recommended)"; LOOK_UPDATE_DRAFT.md §1): every lit part of every listed boat (the boats
+    // IndoorPrecipitationExclusion lists as each registers a mast) takes, through its property block, its material's colour (_Color) x a
+    // gain that undoes the change from the clear weather's look here (GentleSnowBefore) to the drawn one: the colour grading's white
+    // balance and tint, exactly for a grey (Undo), and the sun's colour's hue, its brightness left the overcast's (the user's pick on
+    // probe 26h's sheet, run 20261102-180132, 2026-11-02: "2 Colours as before"; measured a little redder than before, red / green
+    // 1.63 against 1.43, as the colour grading saturates the darker picture). The ambient
+    // light hardly reaches a boat (probe 26g: the deck 71 to 67 with none) and the overcast hides the sun's shadows everywhere
+    // (MagneticSky), so those stay the overcast's. By day only: the gain eased to none by the game's night lerp (the night palette's
+    // sun is black, so its hue can't be taken: in 1.2.2's sixth build every boat and item aboard drew black at night, the user,
+    // 2026-11-02: "in the night the ship looks all black in gentle slow") and by DawnFade x its dawn lerp. While the gain moves the
+    // parts are updated a slice a frame; when it ends their blocks are put back. The parts being outlined have their own blocks for the
+    // outline's draw (GentleSnowOutlinePatch). Particles, unlit shaders and the parts on the UI, player and water layers are left alone.
+    internal static class GentleSnowBoats
+    {
+        // how much of the gain the dawn and dusk take away (the user, 2026-11-02, on the sixth build: "ship also looks too standing out
+        // at dawn time": the clear weather's dawn sun is orange, 0.57 / 0.39 / 0.23 at a white balance near +66, the cloudy one's a dim
+        // grey, so the gain drew the boat in a clear sunrise's colours under the grey overcast): x (1 - DawnFade x the dawn lerp).
+        // The user's pick on probe 26i's deck sheet (0 as the sixth build, 0.5 and 1 pictured at the dawn lerp 0.8, run 20261102-184636:
+        // the gain 2.67 / 0.81 / 0.19, 2.01 / 0.88 / 0.52, 1.34 / 0.96 / 0.84), 2026-11-02: "3 Eased (Recommended)"
+        private const float DawnFade = 1f;
+        // how much of the sun's hue is put back: 1 the whole hue (the user's first pick on probe 26h's sheet, in Medi's weather a gain of
+        // 1.25 / 0.97 / 0.72; in Al'Ankh's, whose clear sun is warmer, 1.0 / 0.82 / 0.70, it is 1.64 / 0.90 / 0.52, the deck's planks
+        // red / green +0.285 against before), 0 only the colour grading's change undone. The user's pick on probe 26i's deck sheet (1,
+        // 0.5 and 0 pictured at noon, run 20261102-184636: at 0.5 the gain 1.40 / 0.94 / 0.67, the planks +0.118), 2026-11-02: "B Half
+        // the sun's hue (Recommended)"
+        private const float HueShare = 0.5f;
+
+        private sealed class Part
+        {
+            internal Renderer Renderer;
+            internal int Id;           // the renderer's instance id (the outlines' lookup)
+            internal bool[] Lit;       // the slots given the gain
+            internal bool Whole;       // one block for the renderer (every slot lit, one colour), else one per lit slot
+            internal bool HadBlock;    // it had a block of its own (another mod's) when first seen
+            internal MaterialPropertyBlock Original;   // that block as it was when the part was last coloured
+            internal bool Applied;
+        }
+
+        private static readonly List<Part> parts = new List<Part>();
+        private static readonly Dictionary<int, Part> byId = new Dictionary<int, Part>();
+        private static readonly List<Part> lifted = new List<Part>();
+        private static readonly HashSet<Renderer> known = new HashSet<Renderer>();
+        private static readonly List<Renderer> found = new List<Renderer>();
+        private static readonly List<Material> materials = new List<Material>();
+        private static readonly MaterialPropertyBlock block = new MaterialPropertyBlock();
+        private static readonly int ColorId = Shader.PropertyToID("_Color");
+        private static readonly string[] LitShaders = { "Standard", "Standard (Specular setup)", "Legacy Shaders/Diffuse", "Legacy Shaders/Bumped Diffuse",
+            "Legacy Shaders/Specular", "Legacy Shaders/Bumped Specular", "Legacy Shaders/VertexLit", "Particles/Standard Surface" };
+        private const int Slice = 96, WaterLayer = 4, UiLayer = 5, PlayerLayer = 11;
+        private const float Step = 0.003f;          // a gain change this large (any channel) starts a new pass
+        private static Vector3 passGain = Vector3.one;
+        private static int next = -1;               // the running pass's next part, -1 when none runs
+        private static int holding;                 // the parts holding a gain (a pass the overcast ended half way leaves some)
+        private static bool added;                  // parts found since the last pass
+        private static float nextDiscovery;
+        private static int boatTurn, discoveries;
+        private static BoatRefs lastAboard;
+
+        internal static void Tick()
+        {
+            Vector3 gain = Vector3.one;
+            bool on = GentleSnowBefore.Valid && GentleSnowLightPatch.Overcast() > 0f && Gain(out gain);
+            if (on && Time.unscaledTime >= nextDiscovery)
+            {
+                nextDiscovery = Time.unscaledTime + 3f;
+                Discover();
+            }
+
+            if (next < 0)
+            {
+                if (on ? !added && Mathf.Max(Mathf.Abs(gain.x - passGain.x), Mathf.Abs(gain.y - passGain.y), Mathf.Abs(gain.z - passGain.z)) < Step : holding == 0)
+                {
+                    return;
+                }
+
+                next = 0;
+                passGain = on ? gain : Vector3.one;
+                added = false;
+            }
+
+            for (int end = Mathf.Min(next + Slice, parts.Count); next < end; next++)
+            {
+                if (on)
+                {
+                    Apply(parts[next], gain);
+                }
+                else
+                {
+                    PutBack(parts[next]);
+                }
+            }
+
+            if (next >= parts.Count)
+            {
+                next = -1;
+                for (int i = parts.Count - 1; i >= 0; i--)
+                {
+                    if (parts[i].Renderer == null)
+                    {
+                        holding -= parts[i].Applied ? 1 : 0;
+                        byId.Remove(parts[i].Id);
+                        parts.RemoveAt(i);
+                    }
+                }
+
+                known.RemoveWhere(r => r == null);
+            }
+        }
+
+        // every part put back at once (the plugin's shutdown)
+        internal static void Restore()
+        {
+            foreach (Part part in parts)
+            {
+                PutBack(part);
+            }
+
+            next = -1;
+            holding = 0;
+            passGain = Vector3.one;
+            lifted.Clear();
+        }
+
+        // the gain (linear RGB) undoing the change from the clear weather's look here to the drawn one
+        private static bool Gain(out Vector3 gain)
+        {
+            gain = Vector3.one;
+            OceanColorBlender blender = OceanColorBlender.instance;
+            Light sun = RenderSettings.sun != null ? RenderSettings.sun : Sun.sun != null ? Sun.sun.GetComponent<Light>() : null;
+            float weight = Sun.sun != null ? (1f - Sun.sun.GetNightLerp()) * (1f - DawnFade * Sun.sun.GetDawnLerp()) : 1f;
+            if (blender == null || blender.pp == null || sun == null || weight <= 0.001f)
+            {
+                return false;
+            }
+
+            var drawn = blender.pp.colorGrading.settings.basic;
+            Vector3 grading = Undo(GentleSnowBefore.Temperature, GentleSnowBefore.Tint, drawn.temperature, drawn.tint);
+            Color before = GentleSnowBefore.SunColor.linear, now = sun.color.linear;
+            Vector3 light = Vector3.one;   // the sun's hue only, where both suns give light
+            if (Luminance(before) > 1e-3f && Luminance(now) > 1e-3f)
+            {
+                light = new Vector3(before.r / Mathf.Max(now.r, 1e-3f), before.g / Mathf.Max(now.g, 1e-3f), before.b / Mathf.Max(now.b, 1e-3f));
+                light /= Mathf.Max(0.2126f * light.x + 0.7152f * light.y + 0.0722f * light.z, 1e-3f);
+                light = Vector3.Lerp(Vector3.one, light, HueShare);
+            }
+
+            gain = Vector3.Lerp(Vector3.one, Vector3.Scale(grading, light), weight);
+            return true;
+        }
+
+        private static float Luminance(Color c) => 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
+
+        // The linear RGB gain on a grey that makes the white balance and tint `now` draw it as `before` draws it. PostProcessing v1 applies
+        // the white balance in ACEScg (LMS x the balance, ColorGradingComponent.CalculateColorBalance and its LUT shader's LIN_2_LMS and
+        // LMS_2_LIN), where a grey stays grey; the gain back in linear sRGB (ACES's AP1 to sRGB). It predicts the cooling measured on the
+        // sea from +10 to -4 (red x 0.93, blue x 1.09 in gamma; probe 26d measured x 0.92 and x 1.09).
+        internal static Vector3 Undo(float before, float beforeTint, float now, float nowTint)
+        {
+            Vector3 a = Balance(before, beforeTint), b = Balance(now, nowTint);
+            float l = a.x / b.x * 0.94927232f, m = a.y / b.y * 1.03537135f, s = a.z / b.z * 1.0873742f;
+            float r = 2.85847f * l - 1.62879f * m - 0.0248910f * s, g = -0.210182f * l + 1.15820f * m + 0.000324281f * s, bl = -0.0418120f * l - 0.118169f * m + 1.06867f * s;
+            return new Vector3(1.70505f * r - 0.62179f * g - 0.08326f * bl, -0.13026f * r + 1.14080f * g - 0.01055f * bl, -0.02400f * r - 0.12897f * g + 1.15297f * bl);
+        }
+
+        // PostProcessing v1's ColorGradingComponent.CalculateColorBalance
+        private static Vector3 Balance(float temperature, float tint)
+        {
+            float t1 = temperature / 55f, t2 = tint / 55f;
+            float x = 0.31271f - t1 * (t1 < 0f ? 0.1f : 0.05f), y = 2.87f * x - 3f * x * x - 0.27509508f + t2 * 0.05f;
+            float cx = x / y, cz = (1f - x - y) / y;
+            return new Vector3(0.949237f / (0.7328f * cx + 0.4296f - 0.1624f * cz), 1.03542f / (-0.7036f * cx + 1.6975f + 0.0061f * cz),
+                1.08728f / (0.003f * cx + 0.0136f + 0.9834f * cz));
+        }
+
+        // the new renderers of the boat the player is on (when it changes, and every 10th call, as a shipyard can change its parts) and of
+        // one other listed boat within 2,000 of the view, in turn
+        private static void Discover()
+        {
+            Transform current = GameState.currentBoat;
+            BoatRefs aboard = current != null ? current.GetComponentInParent<BoatRefs>() : null;
+            if (aboard != null && (aboard != lastAboard || discoveries % 10 == 0))
+            {
+                Scan(aboard);
+            }
+
+            lastAboard = aboard;
+            discoveries++;
+            HashSet<BoatRefs> boats = IndoorPrecipitationExclusion.Boats;
+            Camera view = Camera.main;
+            if (boats.Count == 0 || view == null)
+            {
+                return;
+            }
+
+            int pick = boatTurn++ % boats.Count, i = 0;
+            foreach (BoatRefs boat in boats)
+            {
+                if (i++ != pick)
+                {
+                    continue;
+                }
+
+                if (boat != null && boat != aboard && (boat.transform.position - view.transform.position).sqrMagnitude < 2000f * 2000f)
+                {
+                    Scan(boat);
+                }
+
+                break;
+            }
+        }
+
+        private static void Scan(BoatRefs boat)
+        {
+            boat.GetComponentsInChildren<Renderer>(true, found);
+            foreach (Renderer renderer in found)
+            {
+                if (known.Add(renderer))
+                {
+                    Consider(renderer);
+                }
+            }
+
+            found.Clear();
+        }
+
+        private static void Consider(Renderer renderer)
+        {
+            int layer = renderer.gameObject.layer;
+            if (renderer is ParticleSystemRenderer || layer == UiLayer || layer == PlayerLayer || layer == WaterLayer)
+            {
+                return;
+            }
+
+            renderer.GetSharedMaterials(materials);
+            var lit = new bool[materials.Count];
+            bool any = false, all = true, oneColour = true;
+            Color first = Color.clear;
+            for (int i = 0; i < materials.Count; i++)
+            {
+                Material material = materials[i];
+                lit[i] = material != null && material.shader != null && Array.IndexOf(LitShaders, material.shader.name) >= 0 && material.HasProperty(ColorId);
+                if (!lit[i])
+                {
+                    all = false;
+                    continue;
+                }
+
+                Color colour = material.GetColor(ColorId);
+                oneColour &= !any || colour == first;
+                first = any ? first : colour;
+                any = true;
+            }
+
+            materials.Clear();
+            if (any)
+            {
+                bool hadBlock = renderer.HasPropertyBlock();
+                var part = new Part { Renderer = renderer, Id = renderer.GetInstanceID(), Lit = lit, Whole = all && oneColour, HadBlock = hadBlock,
+                    Original = hadBlock ? new MaterialPropertyBlock() : null };
+                parts.Add(part);
+                byId[part.Id] = part;
+                added = true;
+            }
+        }
+
+        // the part coloured (Write), a block of its own kept to put back
+        private static void Apply(Part part, Vector3 gain)
+        {
+            if (part.Renderer == null)
+            {
+                return;
+            }
+
+            if (!part.Applied && part.HadBlock)
+            {
+                part.Renderer.GetPropertyBlock(part.Original);
+            }
+
+            Write(part, gain);
+            holding += part.Applied ? 0 : 1;
+            part.Applied = true;
+        }
+
+        // the part's colour x the gain, in its block: the renderer's block (another mod's values kept) or, for a renderer whose slots
+        // differ, a block per lit slot copied from it
+        private static void Write(Part part, Vector3 gain)
+        {
+            Renderer renderer = part.Renderer;
+            renderer.GetSharedMaterials(materials);
+            for (int i = 0; i < part.Lit.Length && i < materials.Count; i++)
+            {
+                if (!part.Lit[i] || materials[i] == null || !materials[i].HasProperty(ColorId))
+                {
+                    continue;
+                }
+
+                Color colour = materials[i].GetColor(ColorId), linear = colour.linear;
+                renderer.GetPropertyBlock(block);
+                block.SetColor(ColorId, new Color(linear.r * gain.x, linear.g * gain.y, linear.b * gain.z, linear.a).gamma);
+                if (part.Whole)
+                {
+                    renderer.SetPropertyBlock(block);
+                    break;
+                }
+
+                renderer.SetPropertyBlock(block, i);
+            }
+
+            materials.Clear();
+        }
+
+        private static void PutBack(Part part)
+        {
+            holding -= part.Applied ? 1 : 0;
+            if (part.Applied && part.Renderer != null)
+            {
+                Clear(part);
+            }
+
+            part.Applied = false;
+        }
+
+        // the part's own blocks back: none, or for a renderer that came with another mod's block that block as it was when the part was
+        // coloured
+        private static void Clear(Part part)
+        {
+            Renderer renderer = part.Renderer;
+            if (!part.Whole)
+            {
+                for (int i = 0; i < part.Lit.Length; i++)
+                {
+                    if (part.Lit[i])
+                    {
+                        renderer.SetPropertyBlock(null, i);
+                    }
+                }
+            }
+            else
+            {
+                // shortcut: no block's values can be listed, so a change that other mod makes to its block while Gentle Snow colours
+                // the part is lost when the block is put back; replace if such a mod shows up
+                renderer.SetPropertyBlock(part.HadBlock ? part.Original : null);
+            }
+        }
+
+        // the parts being outlined given their own blocks back for the outline's draw (GentleSnowOutlinePatch), then coloured again
+        internal static void LiftOutlined(IEnumerable<cakeslice.Outline> outlines)
+        {
+            if (holding == 0 || outlines == null)
+            {
+                return;
+            }
+
+            foreach (cakeslice.Outline outline in outlines)
+            {
+                Renderer renderer = outline != null ? outline.Renderer : null;
+                if (renderer != null && byId.TryGetValue(renderer.GetInstanceID(), out Part part) && part.Applied && part.Renderer != null)
+                {
+                    Clear(part);
+                    lifted.Add(part);
+                }
+            }
+        }
+
+        internal static void ColourLifted()
+        {
+            foreach (Part part in lifted)
+            {
+                if (part.Applied && part.Renderer != null)
+                {
+                    Write(part, passGain);
+                }
+            }
+
+            lifted.Clear();
+        }
+    }
+
+    // The game's outlines (cakeslice's OutlineEffect) redraw an outlined renderer with their buffer material, whose _Color is the
+    // outline's colour, and the renderer's property block applies to that draw too: with Gentle Snow's boats coloured, every outline
+    // aboard was drawn in its part's colour, so lost (the user, 2026-11-02: "all things on board, the item is black also, also outlines
+    // are missing", "actually no matter the time, all the outline is blocked when in gentle snow"). OnPreRender draws them at once (its
+    // outline camera's Render): the outlined parts have their own blocks back for it and Gentle Snow's colour after.
+    [HarmonyPatch(typeof(cakeslice.OutlineEffect), "OnPreRender")]
+    internal static class GentleSnowOutlinePatch
+    {
+        [HarmonyPrefix]
+        private static void Prefix(cakeslice.LinkedSet<cakeslice.Outline> ___outlines)
+        {
+            GentleSnowBoats.LiftOutlined(___outlines);
+        }
+
+        [HarmonyPostfix]
+        private static void Postfix()
+        {
+            GentleSnowBoats.ColourLifted();
+        }
+    }
+
+    // Gentle Snow's sea warmed back like its palette colours (GentleSnowLightPatch.SeaBack) in the ocean material's colours the game's
+    // palette never sets: its reflection of the sky, Crest's procedural sky (keyword _PROCEDURALSKY_ON: _SkyBase, _SkyTowardsSun,
+    // _SkyAwayFromSun; most of the sea's tone, probe 26d, BetterStorm_FAILED.md), its shallow-water colour and its foam. Alternative
+    // Ocean Color and Ocean Color Configurator set some of them in their own ApplyPalette postfixes, each keeping its own baseline only
+    // while the material still holds its last write: so they are warmed after every other postfix and put back before the next apply,
+    // and those mods never see the warmed value.
+    [HarmonyPatch(typeof(OceanColorBlender), "ApplyPalette")]
+    internal static class GentleSnowSeaMaterialPatch
+    {
+        private static readonly int[] ColourIds =
+        {
+            Shader.PropertyToID("_SkyBase"), Shader.PropertyToID("_SkyTowardsSun"), Shader.PropertyToID("_SkyAwayFromSun"),
+            Shader.PropertyToID("_SubSurfaceShallowCol"), Shader.PropertyToID("_FoamWhiteColor"), Shader.PropertyToID("_FoamBubbleColor")
+        };
+        private static readonly Color[] Seen = new Color[ColourIds.Length], Wrote = new Color[ColourIds.Length];
+        private static Material warmed;
+
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
+        private static void Prefix(Material ___crestMaterial)
+        {
+            if (warmed == null)
+            {
+                return;
+            }
+
+            if (warmed == ___crestMaterial)
+            {
+                for (int i = 0; i < ColourIds.Length; i++)
+                {
+                    if (warmed.HasProperty(ColourIds[i]) && warmed.GetColor(ColourIds[i]) == Wrote[i])
+                    {
+                        warmed.SetColor(ColourIds[i], Seen[i]);
+                    }
+                }
+            }
+
+            warmed = null;
+        }
+
+        [HarmonyPostfix]
+        [HarmonyPriority(Priority.Last)]
+        private static void Postfix(Material ___crestMaterial)
+        {
+            float shift = GentleSnowLightPatch.SeaMaterialShift;
+            if (shift == 0f || ___crestMaterial == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < ColourIds.Length; i++)
+            {
+                if (___crestMaterial.HasProperty(ColourIds[i]))
+                {
+                    Seen[i] = ___crestMaterial.GetColor(ColourIds[i]);
+                    Wrote[i] = GentleSnowLightPatch.WarmBack(Seen[i], shift);
+                    ___crestMaterial.SetColor(ColourIds[i], Wrote[i]);
+                }
+            }
+
+            warmed = ___crestMaterial;
+        }
+    }
+
+    // Gentle Snow's horizon (the user, 2026-11-01, on probe 25j's sheets: "4 Clear-weather height (Recommended)"). The game's horizon
+    // fog (HorizonFog, a ring round the view drawn in the fog colour) is minScale (120) tall up to a fog of 0.003, 800 from 0.0035 and
+    // up to 2,222 from 0.01 to 0.03 (level24's values). Under the overcast the fog nears the region's cloudy one (0.01 at 47° N, 0.003
+    // at 38.7°: runs 20261101-103048 and -102343), and the user's Dizzy Gamma (0.53) draws the fog colour darker than the sky, which
+    // takes no fog: a wide dark band over the horizon, gone with their gamma at 1. So after the game sets its height each frame, it is
+    // taken toward minScale by the overcast; under water it keeps the game's.
+    [HarmonyPatch(typeof(HorizonFog), "LateUpdate")]
+    internal static class GentleSnowHorizonFogPatch
+    {
+        [HarmonyPostfix]
+        private static void Postfix(HorizonFog __instance)
+        {
+            if (SwimEffects.isUnderwater || !StormInfluenceService.TryGetCurrent(out StormInfluence influence) || !influence.IsGentleSnow)
+            {
+                return;
+            }
+
+            float overcast = GentleSnowRules.Overcast(influence.CenterDistance);
+            Transform frame = __instance.transform;
+            Vector3 scale = frame.localScale;
+            if (overcast > 0f && scale.z > __instance.minScale)
+            {
+                scale.z = Mathf.Lerp(scale.z, __instance.minScale, overcast);
+                frame.localScale = scale;
+            }
+        }
+    }
+
+    // The Doldrums, shown as High Pressure (HANDOFF_1.2.0.md §4): a calm, clear area south of 37° N.
     internal static class DoldrumsRules
     {
         internal const float CoreRadius = 2100f;
@@ -2915,8 +4197,7 @@ namespace BetterStorm
     // disc inside the ring and a ring outside it. Transparent things hide each other only
     // by their draw order, so seen from outside the core: the far curtains (2997), the inner cloud (2998), the fog dome
     // (2999), the near curtains (3000), the outer cloud (3000, sorted after them), the rain (3001); from inside the core both
-    // clouds go under the dome (2998) and the aurora is hidden. Look checked in game: BetterStorm_TEST_RESULTS.md, the
-    // -bsVisualProbe runs of 2026-10-25.
+    // clouds go under the dome (2998) and every curtain over it, in its night look at every hour, faded by the fog (CoreClear).
     internal sealed class MistAurora : MonoBehaviour
     {
         private const int Curtains = 12, Columns = 56, Rows = 5;
@@ -3011,11 +4292,31 @@ namespace BetterStorm
         // doesn't look like it", "i mean darker shade than storm cloud from hurricane") and picked 0.5 of 0.8 / 0.65 / 0.5 (run
         // 20261026-204937, p16p-mist-grey-night.png: the lower puffs 125 against 146 at 0.8 and the Hurricane's 199 from outside;
         // the sun lights the puffs too, so the tone moves them less than its own change)
-        private const float CloudTone = 0.5f;
-        // the aurora's light on the cloud: under each column a soft band in the curtain's green, from SkirtY[0] over the sea up to
-        // SkirtY[2], strongest (x Skirt x the column's strength) at SkirtY[1], in the cloud's upper part (its puffs' centres 200-1,100,
-        // 400-1,000 across); drawn with the curtains (added by night, blended by day), so not seen from inside the core either
-        // (the user's pick of 0, 0.15 and 0.3, 2026-10-26: "0.15"; p16o-mist-light.png, run 20261026-200212)
+        // For the fog bank (LOOK_UPDATE_DRAFT.md §4.3) the user picked x 0.8 of 0.5 / 0.65 / 0.8 (2026-10-31: "x 0.8"; probe 22's
+        // p30-2: 0.5 read as a dark brown-grey band like an island, 0.8 as a white-grey fog wall, as real fog banks are in sun)
+        internal const float CloudTone = 0.8f;
+        // The fog bank's top over the sea (LOOK_UPDATE_DRAFT.md §4.3): the user picked 300 of 200 / 300 / 450 (2026-10-31: "300";
+        // probe 22's p30-1), then 450 (2026-11-01: "increase fog bank's height to 450"; at 300 clear sky showed between its ragged top,
+        // 240-360, and the aurora's lower edge, 450-1,890 over the sea). Its texture is the game's own floating mist's
+        // (`particles-single`, a smooth soft blob, the particles FogEffectController shows in thick fog; the user's pick "1 Floating
+        // mist" against the storm's own puff, p30b-1)
+        internal const float BankTop = 450f;
+        // the bank's puffs, by their share of BankTop: their centres over the sea and their heights (each its own), and their widths
+        // (metres); the wall (the ring) reaches a ragged top of about 0.8-1.2 x BankTop (a puff shows to about 0.35 of its size from
+        // its centre, probe 7), the flat top inside it a little under that
+        private const float WallCentreFrom = 0.2f, WallCentreTo = 0.75f, WallHeightFrom = 0.5f, WallHeightTo = 1.3f;
+        private const float WallWidthMin = 600f, WallWidthMax = 1400f;
+        private const float TopCentreFrom = 0.5f, TopCentreTo = 0.8f, TopHeightFrom = 0.33f, TopHeightTo = 0.67f;
+        private const float TopWidthMin = 800f, TopWidthMax = 1600f;
+        // the bank's slow drift (real sea fog drifts with a light wind and lifts above about 9-15 knots): along the ring (radians a
+        // second: about 2 m a second at the wall) and outward (m a second); over a puff's 60 s about 130 and 90 m
+        private const float BankTurn = 0.0006f;
+        private const float BankDrift = 1.5f;
+        // the aurora's light on the cloud: under each column a soft band in the curtain's green, from SkirtY[0] x the fog bank's top
+        // (BankTop) over the sea up to SkirtY[2] x it, strongest (x Skirt x the column's strength) at SkirtY[1] x it, on the bank's upper
+        // part (moved down to it, LOOK_UPDATE_DRAFT.md §4.3; from 300 to 1,500 on the storm cloud before); drawn with the curtains (added
+        // by night, blended by day), so in the core at its night strength with them (the user's pick of 0, 0.15 and 0.3, 2026-10-26:
+        // "0.15"; p16o-mist-light.png, run 20261026-200212)
         private const float Skirt = 0.15f;
         // by day x this: the day layer blends over the light grey cloud, and at 0.15-0.3 its green didn't show (run 20261026-195215)
         private const float SkirtDay = 3f;
@@ -3024,7 +4325,7 @@ namespace BetterStorm
         // picked x 0.3 (pictured at 1 / 0.4 / 0.2, and 0.4 on the cloud's top only, run 20261026-204937), then after testing 1.2.1 in
         // game (2026-10-26): "Reduce the night green color of storm cloud to x0.2"
         private const float SkirtNight = 0.2f;
-        private static readonly float[] SkirtY = { 300f, 1000f, 1500f };
+        private static readonly float[] SkirtY = { 0.2f, 0.75f, 1.1f };
         // The arcs (the user, after testing 1.2.1 in game, 2026-10-26: "Show me a aurora without tapering, i think it will looks more
         // like real life aurora, if you have other suggestion to make it looks more like real life one, tell me. like maybe make it
         // have multiple section instead of only 1 long aurora"; on probe 17c's pictures: "Build arc."): the ring broken into four arcs
@@ -3063,13 +4364,69 @@ namespace BetterStorm
         private const float CurlWave = 520f;
         private const float CurlSpeed = 0.35f;         // radians a second
         private const float CurlFrom = 0.55f, CurlFull = 0.7f;
-        // Pulses: now and then a patch that pulses. Where another slow noise is high (PulseFrom-PulseFull; it drifts over about 20 s),
-        // the column's strength swings by up to PulseDepth on a period of PulseMin-PulseMax s, each curtain its own: a real pulsating
-        // patch's seconds against the arcs' minutes, nearly out and back (at 0.7 the brightest patch only dimmed from 86 to 68, run
-        // 20261026-225512)
-        private const float PulseDepth = 1f;
-        private const float PulseMin = 2.5f, PulseMax = 4.5f;
+        // Pulses: patches that go out and back, only in a substorm's recovery (LOOK_UPDATE_DRAFT.md §4.4; real pulsating aurora:
+        // diffuse patches on for 3-5 s and off for about 0.6 s, each on its own period, 2-20 s, JGR, Partamies 2019). Where another
+        // slow noise is high (PulseFrom-PulseFull; it drifts over about 20 s) the column is on PulseOnMin-PulseOnMax s and off
+        // PulseOffMin-PulseOffMax s, each curtain its own, switching over PulseEdge s, as deep as its section's share of the recovery
+        // (pulses). Until the look update (which replaces the user's "Keep the curls, pulses, ...", 2026-10-27, for the pulses) the
+        // column's strength x (1 + sin) on a period of 2.5-4.5 s at any time
+        private const float PulseOnMin = 3f, PulseOnMax = 5f, PulseOffMin = 0.6f, PulseOffMax = 7f, PulseEdge = 0.3f;
         private const float PulseFrom = 0.62f, PulseFull = 0.72f;
+        // The substorms (LOOK_UPDATE_DRAFT.md §4.4; the user, 2026-10-31: "Make aurora have more changing colors, and aurora should
+        // be moving like real life counter part", then the pick "Random substorms (Recommended)"): each section (an arc or a middle
+        // curtain) has an activity, 0 quiet to 1 a breakup, on a schedule in real seconds (substormClock: the game's time speed
+        // doesn't change it, a pause stops it). Quiet for QuietMin-QuietMax s (the first breakup within FirstMin-QuietMax s), the
+        // activity QuietLow-QuietHigh by a slow noise; then a breakup: one section rises to 1 over RiseSeconds and the others start
+        // within FollowSeconds; active ActiveMin-ActiveMax s; a recovery of RecoverMin-RecoverMax s back to quiet, its patches
+        // pulsing. A real display's growth, breakup, expansion and recovery take about 1 h, 10-15 min, 15-30 min and 1 h or more
+        // (Aurorasaurus; Partamies 2013): here minutes
+        private const int Sections = 7;
+        private const float QuietMin = 240f, QuietMax = 480f, FirstMin = 30f, QuietLow = 0.15f, QuietHigh = 0.3f;
+        private const float RiseSeconds = 15f, FollowSeconds = 30f;
+        private const float ActiveMin = 60f, ActiveMax = 120f, RecoverMin = 120f, RecoverMax = 180f;
+        // the red top lags the activity (oxygen's red line is given off about 110 s after the atom is excited, the green in 0.7 s):
+        // the upper rows' and the veil's colour follow the activity smoothed over RedLag s, so the red builds after a breakup and
+        // lingers after it calms
+        private const float RedLag = 90f;
+        // What the activity drives: the brightness x Lerp(BrightQuiet, BrightBreakup, the activity); and by its share over quiet
+        // (`storm`, 0 up to QuietHigh: quiet moves as before) the folds Lerp(FoldQuiet, FoldBreakup) high (the second wave in
+        // proportion) and FoldSpeedUp times as fast, within Lerp(FoldLimit, FoldLimitBreakup) of the path; the rays racing along
+        // the curtain up to RayRace m a second over the drift's 18, each section its own way (about 0.8° a second seen from 10 km,
+        // real rays 0.5-4° a second at low elevation); curls from CurlMore lower on the noise; the lower hem's alpha up to HemAlpha.
+        // The amounts the user picked from probe 23's pictures (2026-10-31, LOOK_UPDATE_DRAFT.md §1): the breakup's strength "2
+        // Draft's (Recommended)" (x 1.5, folds 150 within 160, the hem 0.5; of 1.3 / 110 / 120 / 0.3 and 1.7 / 200 / 220 / 0.7), its
+        // motion "Calmer" (folds 3 times as fast, the rays up to about 130 m a second; of x 6 and 250, and x 9 and 350)
+        private const float BrightQuiet = 0.6f;
+        internal const float BrightBreakup = 1.5f;
+        private const float FoldQuiet = 55f, FoldSecond = 22f / 55f, FoldSpeed = 0.25f, FoldSpeed2 = 0.6f, FoldSpeedUp = 3f;
+        internal const float FoldBreakup = 150f, FoldLimitBreakup = 160f;
+        private const float RayRace = 112f;
+        private const float CurlMore = 0.12f;
+        internal const float HemAlpha = 0.5f;
+        // how much of a breakup's look shows by day (the user, 2026-11-02, in game on 1.2.2's seventh build: "also when flare up the
+        // aurora looks out of place", their picture a breakup by day from outside, bright pink and white curtains with saw-tooth lower
+        // edges against the blue): the brightness over quiet, the pink hem and the red top x DayBreakup by day (1 - the night look),
+        // all of it by night and in the core; the motion and the folds as they are. The user's pick on probe 27's sheets (1 as
+        // released, 0.5, 0.25 and 0 pictured at noon and 17 h, run 20261102-194137: at noon the brightness 1.50 / 1.18 / 1.03 / 0.87, the
+        // hem 0.50 / 0.25 / 0.13 / 0), 2026-11-02: "4 None by day"
+        private const float DayBreakup = 0f;
+        // The colours, on each vertex (LOOK_UPDATE_DRAFT.md §4.4): the lower hem from the green to pink-magenta (HemColour) with
+        // `storm`, at once (nitrogen's light, in bright active displays only); the green body drifting between yellow-green and
+        // blue-green along the curtain (GreenYellow, GreenBlue: GreenSpread of the way, by a slow noise HueScale m long drifting at
+        // HueDrift a second; GreenSteps shades worked out once); the upper rows and the veil from purple to red-violet (UpperRed,
+        // TopRed, VeilRed; the veil's strength x up to VeilRedGain) with the red, the activity lagged. Faint aurora looks grey-green
+        // to the eye (EarthSky): the quiet colours stay as before. The green's spread the user's pick "3 Full" (2026-10-31, of 0, 0.5
+        // and 1, probe 23's p40-2)
+        private static readonly Color HemColour = new Color(1f, 0.3f, 0.65f);
+        private static readonly Color GreenYellow = new Color(0.6f, 1f, 0.25f), GreenBlue = new Color(0.15f, 0.9f, 0.7f);
+        internal const float GreenSpread = 1f;
+        private const int GreenSteps = 16;
+        private const float HueScale = 1500f, HueDrift = 0.01f;
+        private static readonly Color UpperRed = new Color(0.85f, 0.2f, 0.5f), TopRed = new Color(0.95f, 0.15f, 0.35f);
+        private static readonly Color VeilRed = new Color(0.9f, 0.12f, 0.3f);
+        private const float VeilRedGain = 1.5f;
+        // The QA's pictures and cost runs hold every section at these (0-1; below 0 the substorms' own)
+        internal static float QaActivity = -1f, QaRed = -1f, QaPulses = -1f;
         // Veil: a faint wide glow on top of each curtain, red-violet as a real display's: the red oxygen glow lies on top of the green
         // and reaches above it, faint at the top where the air is thin (NASA's ISS aurora photographs; Windows to the Universe). Under
         // every SkirtStep-th column a smooth band (the texture's plain rows) on its arc's own smooth line, (3,000 + VeilWave x a sine
@@ -3111,6 +4468,18 @@ namespace BetterStorm
         private List<int>[] curtainTriangles;
         private float[] edgeLift, edgeFade, edgeDrop;   // per column: the start over the base, the fade-in, the top's share lowered
         private float[] curlAt, pulseAt;                // per column: its share of a curl and of a pulse
+        private byte[] greenAt;                         // per column: its shade of green (GreenSteps, at the edges' refresh)
+        private Color32[] greenLow, greenHigh;          // the shades of the two green rows (GreenSpread, BuildGreens)
+        // the substorms (Substorms): the clock (real seconds, Update), the schedule, and per section its activity's effects
+        private float substormClock, lastSubstorm, nextBreakup, lastAnimate;
+        private System.Random substormRandom;
+        private float[] breakupAt, activeFor, recoverFor, red;
+        private float[] stormAt, pulses, arcBright, foldHeight, foldLimitAt, foldPhase, foldPhase2, rayShift, hemAlpha, veilGain;
+        private Color32[] hemRow, upperRow, topRow, veilColour;   // per section (the edges' refresh)
+        private readonly Color32[] rowColours = new Color32[Rows];
+        // the curtains' texture coordinates, kept to slide the rays (rayU: each column's along the tile, before its section's shift)
+        private Vector2[] uvs;
+        private float[] rayU;
         // per column, fixed (BuildPaths): its point on the curtain's path, the way across it (the lean, the folds, a curl's swing) and
         // along it (a curl's swing), its metres along the curtain, and where the noise and the rays' texture are read along it
         private float[] pathX, pathZ, acrossX, acrossZ, alongX, alongZ, pathS, noiseAt;
@@ -3118,9 +4487,20 @@ namespace BetterStorm
         private float lastEdges = -1f;
         private readonly List<int> nearTriangles = new List<int>(), farTriangles = new List<int>();
         private int farMask = -1;
+        // the mist's cloud (its disc and ring), their fade into the haze and their renderers (LateUpdate)
+        private readonly PuffFade cloudFade = new PuffFade();
+        private ParticleSystemRenderer[] cloudRenderers = new ParticleSystemRenderer[0];
+        private float viewDistance;   // the camera's level distance from the centre (Update)
+        private float sight = 1f;     // 1 out to the sight's fade, 0 at its limit (Update)
+        // the fog bank's two systems (its flat top, the storm's own layer, and its wall, the clone), the storm's own puff texture, and
+        // whether the bank's texture is set (the game's floating mist is found once the player is there, LateUpdate)
+        private ParticleSystem bankTop, bankWall;
+        private Texture stormTexture, mistTexture;
+        private bool bankTextureSet, mistTextureSearched;
 
-        // The mist's own storm cloud layer becomes the disc inside the ring and a clone of it the ring outside, both drawn with
-        // the game's fog-free cloud shader (LitCloudsNoFog). Returns the clone (switched with the storm's own layer), or null.
+        // The mist's own storm cloud layer becomes the fog bank's flat top (a disc) and a clone of it the bank's wall (a ring round the
+        // curtains), both drawn with the game's fog-free cloud shader (LitCloudsNoFog). Returns the clone (switched with the storm's own
+        // layer), or null.
         internal static ParticleSystem BuildCloud(ModStormController storm, ParticleSystem layer, out Material outerMaterial, out Material innerMaterial)
         {
             outerMaterial = null;
@@ -3146,38 +4526,97 @@ namespace BetterStorm
             ringRenderer.sortingFudge = OuterCloudFudge;
             go.AddComponent<OwnedMaterial>().Material = outerMaterial;
 
-            ShapeCloud(layer, storm.transform, 0f, MagneticMistRules.CloudInnerRadius, MagneticMistRules.CloudInnerPuffs);
-            ShapeCloud(ring, storm.transform, MagneticMistRules.CloudRingInner, MagneticMistRules.CloudRingOuter, MagneticMistRules.CloudRingPuffs);
+            ShapeBank(layer, storm.transform, false);
+            ShapeBank(ring, storm.transform, true);
             ParticleSystem.EmissionModule emission = ring.emission;
             emission.enabled = false;   // switched with the storm's own layer (SetParticleEmission)
             return ring;
         }
 
-        // A flat volume (a disc, or a ring from `inner`) from CloudBottom to CloudBottom + CloudDepth over the sea.
-        private static void ShapeCloud(ParticleSystem ps, Transform storm, float inner, float outer, int puffs)
+        // The fog bank's wall (`wall`: a ring round the curtains) or its flat top (a disc inside it): wide, low puffs, each its own width
+        // and height (a 3D start size: a billboard takes its x and y), level within about 3°, overlapping into one bank whose top is near
+        // BankTop and whose base is on the sea (a flat puff too sparse reads as a streak, BetterStorm_FAILED.md), drifting slowly out
+        // and along the ring; the shreds at its edge are its puffs being born and dying (each lives the storm puff's 60 s).
+        private static void ShapeBank(ParticleSystem ps, Transform storm, bool wall)
         {
-            ps.transform.localPosition = new Vector3(0f, MagneticMistRules.CloudBottom - storm.position.y, 0f);
+            float top = BankTop;
+            float centreFrom = (wall ? WallCentreFrom : TopCentreFrom) * top, centreTo = (wall ? WallCentreTo : TopCentreTo) * top;
+            int puffs = wall ? MagneticMistRules.BankWallPuffs : MagneticMistRules.BankTopPuffs;
+            ps.transform.localPosition = new Vector3(0f, centreFrom - storm.position.y, 0f);
             ps.transform.localRotation = Quaternion.identity;
             ParticleSystem.MainModule main = ps.main;
             main.maxParticles = puffs;
-            main.startSize = new ParticleSystem.MinMaxCurve(MagneticMistRules.CloudPuffMin, MagneticMistRules.CloudPuffMax);
+            main.startSize3D = true;
+            main.startSizeX = wall ? new ParticleSystem.MinMaxCurve(WallWidthMin, WallWidthMax) : new ParticleSystem.MinMaxCurve(TopWidthMin, TopWidthMax);
+            main.startSizeY = new ParticleSystem.MinMaxCurve((wall ? WallHeightFrom : TopHeightFrom) * top, (wall ? WallHeightTo : TopHeightTo) * top);
+            main.startSizeZ = new ParticleSystem.MinMaxCurve(1f);
+            main.startRotation = new ParticleSystem.MinMaxCurve(-0.05f, 0.05f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(0f);
             main.simulationSpace = ParticleSystemSimulationSpace.Local;
+            ParticleSystem.RotationOverLifetimeModule rotation = ps.rotationOverLifetime;
+            rotation.enabled = false;
+            ParticleSystem.SizeOverLifetimeModule size = ps.sizeOverLifetime;
+            size.separateAxes = false;   // its growth over life alike across and up: the start sizes give the shape
+            ParticleSystem.VelocityOverLifetimeModule velocity = ps.velocityOverLifetime;
+            velocity.enabled = true;
+            velocity.space = ParticleSystemSimulationSpace.Local;
+            velocity.x = new ParticleSystem.MinMaxCurve(0f);
+            velocity.y = new ParticleSystem.MinMaxCurve(0f);
+            velocity.z = new ParticleSystem.MinMaxCurve(0f);
+            velocity.orbitalX = new ParticleSystem.MinMaxCurve(0f);
+            velocity.orbitalY = new ParticleSystem.MinMaxCurve(BankTurn);
+            velocity.orbitalZ = new ParticleSystem.MinMaxCurve(0f);
+            velocity.radial = new ParticleSystem.MinMaxCurve(BankDrift);
             ParticleSystem.ShapeModule shape = ps.shape;
             shape.enabled = true;
             shape.shapeType = ParticleSystemShapeType.ConeVolume;
             shape.angle = 0f;
-            shape.radius = outer;
-            shape.radiusThickness = StormEyeShape.RingThickness(inner, outer);
-            shape.length = MagneticMistRules.CloudDepth;
+            shape.radius = wall ? MagneticMistRules.BankWallOuter : MagneticMistRules.BankTopRadius;
+            shape.radiusThickness = wall ? StormEyeShape.RingThickness(MagneticMistRules.BankWallInner, MagneticMistRules.BankWallOuter) : 1f;
+            shape.length = Mathf.Max(1f, centreTo - centreFrom);
             shape.arc = 360f;
             shape.rotation = new Vector3(-90f, 0f, 0f);   // up from the bottom
             shape.position = Vector3.zero;
             shape.scale = Vector3.one;
             ParticleSystem.EmissionModule emission = ps.emission;
             emission.rateOverTime = puffs / Mathf.Max(1f, main.startLifetime.constantMax);
+            ParticleSystemRenderer renderer = ps.GetComponent<ParticleSystemRenderer>();
+            if (renderer != null)
+            {
+                renderer.flip = new Vector3(0.5f, 0f, 0f);   // half of them mirrored, for variety
+            }
         }
 
-        internal static void Build(ModStormController storm, Material outerCloud, Material innerCloud)
+        // the bank's texture on both its materials: the game's floating mist's (the user's pick), found once through the game's
+        // FogEffectController, inactive ones too (its static instance was never set in probe 22's run: every shot kept the storm
+        // puff); if none has it, the storm's own puff, logged
+        private void SetBankTexture()
+        {
+            if (mistTexture == null && !mistTextureSearched)
+            {
+                mistTextureSearched = true;
+                FogEffectController fogEffect = FogEffectController.instance;
+                if (fogEffect == null)
+                {
+                    FogEffectController[] all = Resources.FindObjectsOfTypeAll<FogEffectController>();   // once (about 3 ms)
+                    fogEffect = all.Length > 0 ? all[0] : null;
+                }
+
+                ParticleSystemRenderer fogRenderer = fogEffect != null && fogEffect.fogParticles != null ? fogEffect.fogParticles.GetComponent<ParticleSystemRenderer>() : null;
+                mistTexture = fogRenderer != null && fogRenderer.sharedMaterial != null ? fogRenderer.sharedMaterial.mainTexture : null;
+                BetterStormPlugin.Instance?.LogFeatureInfo(mistTexture != null
+                    ? "Magnetic Mist: the fog bank takes the game's floating-mist texture (" + mistTexture.name + ")."
+                    : "Magnetic Mist: the game's floating-mist texture was not found (FogEffectController " + (fogEffect != null ? "found" : "missing") +
+                      "); the fog bank keeps the storm puff's.");
+            }
+
+            Texture texture = mistTexture != null ? mistTexture : stormTexture;
+            if (innerCloud != null) innerCloud.mainTexture = texture;
+            if (outerCloud != null) outerCloud.mainTexture = texture;
+            bankTextureSet = true;
+        }
+
+        internal static void Build(ModStormController storm, Material outerCloud, Material innerCloud, ParticleSystem innerLayer, ParticleSystem ring)
         {
             Shader glow = Shader.Find("Particles/Priority Additive") ?? Shader.Find("Particles/Priority Additive (Soft)");
             Shader colour = Shader.Find("Sprites/Default");
@@ -3201,6 +4640,12 @@ namespace BetterStorm
             aurora.dayFar = new Material(aurora.day) { renderQueue = FarQueue };
             aurora.outerCloud = outerCloud;
             aurora.innerCloud = innerCloud;
+            aurora.cloudFade.Add(innerLayer);
+            aurora.cloudFade.Add(ring);
+            aurora.cloudRenderers = aurora.cloudFade.Renderers();
+            aurora.bankTop = innerLayer;
+            aurora.bankWall = ring;
+            aurora.stormTexture = innerCloud != null ? innerCloud.mainTexture : null;
             aurora.BuildMesh();
             go.AddComponent<MeshFilter>().sharedMesh = aurora.mesh;
             MeshRenderer renderer = go.AddComponent<MeshRenderer>();
@@ -3321,6 +4766,23 @@ namespace BetterStorm
             edgeDrop = new float[Curtains * Columns];
             curlAt = new float[Curtains * Columns];
             pulseAt = new float[Curtains * Columns];
+            greenAt = new byte[Curtains * Columns];
+            rayU = new float[Curtains * Columns];
+            uvs = new Vector2[count];
+            breakupAt = new float[Sections]; activeFor = new float[Sections]; recoverFor = new float[Sections]; red = new float[Sections];
+            stormAt = new float[Sections]; pulses = new float[Sections]; arcBright = new float[Sections]; foldHeight = new float[Sections];
+            foldLimitAt = new float[Sections]; foldPhase = new float[Sections]; foldPhase2 = new float[Sections]; rayShift = new float[Sections];
+            hemAlpha = new float[Sections]; veilGain = new float[Sections];
+            hemRow = new Color32[Sections]; upperRow = new Color32[Sections]; topRow = new Color32[Sections]; veilColour = new Color32[Sections];
+            // a new schedule each session: quiet at first (no breakup yet), the first breakup within FirstMin-QuietMax s
+            substormRandom = new System.Random();
+            for (int a = 0; a < Sections; a++)
+            {
+                breakupAt[a] = -1e6f;
+                red[a] = QuietLow;
+            }
+
+            nextBreakup = Mathf.Lerp(FirstMin, QuietMax, (float)substormRandom.NextDouble());
             System.Random random = new System.Random(7);
             for (int k = 0; k < Curtains; k++)
             {
@@ -3362,15 +4824,17 @@ namespace BetterStorm
             mesh = new Mesh { name = "Better Storm aurora" };
             mesh.MarkDynamic();
             BuildPaths();
+            BuildGreens();
             Animate(0f, Vector3.zero);
             // the rays' texture coordinates: along the ring or a middle curtain (each curtain a little offset, so the overlapping ones
-            // don't repeat each other's rays) and up each column's rows; they stay as the curtains move
-            Vector2[] uvs = new Vector2[vertices.Length];
+            // don't repeat each other's rays) and up each column's rows; they stay as the curtains move, the curtains' slid along by
+            // their section's rays in a substorm (Animate)
             for (int k = 0; k < Curtains; k++)
             {
                 for (int c = 0; c < Columns; c++)
                 {
                     float along = noiseAt[k * Columns + c];
+                    rayU[k * Columns + c] = along / RayTile + k * 0.37f;
                     for (int r = 0; r < Rows; r++)
                     {
                         uvs[(k * Columns + c) * Rows + r] = new Vector2(along / RayTile + k * 0.37f, RowV[r] * CurtainV);
@@ -3394,7 +4858,7 @@ namespace BetterStorm
             SplitCurtains(0);
             // out to the arcs' reach, the folds, a curl and the veil's lean; up to the tallest arc's top (290 + 3,750 x 1.1: 4,415) and
             // its veil's (290 + 3,400 x 1.1 x 1.13: 4,516), with room
-            float r0 = MagneticMistRules.CoreRadius + SectionReach + FoldLimit + CurlReach + VeilSlope * 6300f + 100f;
+            float r0 = MagneticMistRules.CoreRadius + SectionReach + FoldLimitBreakup + CurlReach + VeilSlope * 6300f + 100f;
             mesh.bounds = new Bounds(new Vector3(0f, 3350f, 0f), new Vector3(r0 * 2f, 6700f, r0 * 2f));
         }
 
@@ -3505,14 +4969,34 @@ namespace BetterStorm
             transform.position = new Vector3(p.x, 0f, p.z);
             transform.rotation = Quaternion.identity;
             shown = Mathf.MoveTowards(shown, 1f, Time.deltaTime / FadeSeconds);
+            if (Time.timeScale > 0f)
+            {
+                substormClock += Mathf.Min(Time.unscaledDeltaTime, 0.5f);   // real seconds, stopped by a pause
+            }
+
             float nightLerp = Sun.sun != null ? Sun.sun.GetNightLerp() : 0f;
             Camera view = Camera.main;   // not cached: the user plays with a free camera
             Vector3 viewLocal = view != null ? transform.InverseTransformPoint(view.transform.position) : Vector3.zero;
+            viewDistance = new Vector2(viewLocal.x, viewLocal.z).magnitude;
+            // seen only within MagneticMistRules.CloudDistance of the centre, fading into the haze over its last StormEyeShape.SightFade;
+            // past it neither drawn nor rebuilt (LOOK_UPDATE_DRAFT.md §4.1)
+            sight = 1f - StormEyeShape.Haze(viewDistance, MagneticMistRules.CloudDistance);
+            bool inSight = viewDistance < MagneticMistRules.CloudDistance;
+            if (meshRenderer.enabled != inSight)
+            {
+                meshRenderer.enabled = inSight;
+            }
+
+            if (!inSight)
+            {
+                return;
+            }
+
             UpdateDrawOrder(viewLocal);
             // seen from inside the core too, each column faded by the fog on its way (CoreClear, Animate), and there in its night look at
             // every hour (its layers here, the light on the cloud in Animate)
             coreOpen = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(MagneticMistRules.CoreRadius,
-                MagneticMistRules.CoreRadius + CoreFadeWidth, new Vector2(viewLocal.x, viewLocal.z).magnitude));
+                MagneticMistRules.CoreRadius + CoreFadeWidth, viewDistance));
             nightLook = Mathf.Lerp(1f, nightLerp, coreOpen);
             if (lastRefresh < 0f || (Time.time - lastRefresh >= RefreshSeconds && meshRenderer.isVisible))
             {
@@ -3522,8 +5006,8 @@ namespace BetterStorm
 
             // the day look (A, B and C above; B is the day layer's texture)
             float twilight = Sun.sun != null ? Mathf.Lerp(DayNoonShare, 1f, Sun.sun.GetDawnLerp()) : 1f;
-            float glow = shown * Mathf.Lerp(0.25f * twilight, 1f, nightLook), gain = Mathf.Lerp(1f, NightGain, nightLook);
-            Color dayColour = new Color(DayGain, DayGain, DayGain, DayLightStrength * twilight * shown * (1f - nightLook));
+            float glow = shown * sight * Mathf.Lerp(0.25f * twilight, 1f, nightLook), gain = Mathf.Lerp(1f, NightGain, nightLook);
+            Color dayColour = new Color(DayGain, DayGain, DayGain, DayLightStrength * twilight * shown * sight * (1f - nightLook));
             SetGlow(night, glow, gain);
             SetGlow(nightFar, glow, gain);
             day.color = dayColour;
@@ -3536,14 +5020,32 @@ namespace BetterStorm
         }
 
         // the mist's storm cloud, grey (CloudTone; its green is the aurora's light under the curtains, Skirt): set whether or not the
-        // aurora is seen (from inside the core the cloud is still drawn)
+        // aurora is seen (from inside the core the cloud is still drawn). Seen within MagneticMistRules.CloudDistance, as the aurora
+        // (§4.1): over the sight's last stretch paler, toward the fog colour (the user's pick "Mist paler with distance"), and with
+        // faded out (StormEyeShape.FadeShare), so it has sunk into the horizon's haze when its renderers go off at the limit
         private void LateUpdate()
         {
-            Color emission = RenderSettings.fogColor * CloudTone;
+            if (!bankTextureSet && bankWall != null)
+            {
+                SetBankTexture();
+            }
+
+            Color fog = RenderSettings.fogColor;
+            float haze = StormEyeShape.Haze(viewDistance, MagneticMistRules.CloudDistance);
+            Color emission = Color.Lerp(fog * CloudTone, fog, haze);
             emission.a = 1f;
 
             SetEmission(innerCloud, emission);
             SetEmission(outerCloud, emission);
+            cloudFade.Set(StormEyeShape.FadeShare(haze));
+            bool drawn = ModStormController.MistCloudOn && viewDistance < MagneticMistRules.CloudDistance;
+            for (int i = 0; i < cloudRenderers.Length; i++)
+            {
+                if (cloudRenderers[i] != null && cloudRenderers[i].enabled != drawn)
+                {
+                    cloudRenderers[i].enabled = drawn;
+                }
+            }
         }
 
         private static void SetEmission(Material material, Color emission)
@@ -3602,9 +5104,10 @@ namespace BetterStorm
         }
 
         // Folds as two travelling sines along each curtain (and a curl in places), a little lean across it at the top (outward on
-        // the arcs), a flicker per column (and a pulse in places), the veil over the top; each column from its fixed
-        // place on the path (BuildPaths). `viewLocal` (the camera in the aurora's space): from inside the core each column's fade
-        // through the fog (CoreClear).
+        // the arcs), a flicker per column (and a pulse in places, in a recovery), the veil over the top; each column from its fixed
+        // place on the path (BuildPaths), its section's substorm (Substorms) setting how bright, how folded and how fast it is, and
+        // its colours. `viewLocal` (the camera in the aurora's space): from inside the core each column's fade through the fog
+        // (CoreClear).
         private void Animate(float time, Vector3 viewLocal)
         {
             bool edges = lastEdges < 0f || time < lastEdges || time - lastEdges >= EdgeRefreshSeconds;
@@ -3613,26 +5116,39 @@ namespace BetterStorm
                 lastEdges = time;
             }
 
-            float skirt = Skirt * Mathf.Lerp(SkirtDay, SkirtNight, nightLook);
+            // the folds and rays move on by the game's time since the last rebuild, as the folds always moved
+            float step = Mathf.Clamp(time - lastAnimate, 0f, 0.5f);
+            lastAnimate = time;
+            bool raysMoved = Substorms(step, edges);
+
+            // none with the cloud switched off ("Show Mist Cloud", §4.2)
+            float skirt = ModStormController.MistCloudOn ? Skirt * Mathf.Lerp(SkirtDay, SkirtNight, nightLook) : 0f;
             // from inside the core each column faded by the fog on its way to the view (CoreClear), full again over the first
             // CoreFadeWidth outside the core (coreOpen, Update)
             float fogPerMetre = Mathf.Log(Mathf.Clamp(CoreClear, 0.001f, 1f)) / MagneticMistRules.CoreRadius;
 
             for (int k = 0; k < Curtains; k++)
             {
-                // its section (an arc, or a middle curtain), at its own height, brightening and fading on its own over minutes
+                // its section (an arc, or a middle curtain), at its own height, brightening and fading on its own over minutes, and
+                // with its substorm
                 int arc = SectionByCurtain[k];
                 float ph = phase[k], width = curlWidth[k];
-                float arcStrength = 0.55f + 0.45f * Mathf.PerlinNoise(time * 0.015f, 3.7f * arc + 1.3f);
+                float arcStrength = (0.55f + 0.45f * Mathf.PerlinNoise(time * 0.015f, 3.7f * arc + 1.3f)) * arcBright[arc];
                 float arcHeight = SectionHeight[arc];
-                float pulse = Mathf.Sin(time * 2f * Mathf.PI / Mathf.Lerp(PulseMin, PulseMax, Mathf.Repeat(ph, 1f)) + ph);
+                float foldHigh = foldHeight[arc], foldLow = foldHigh * FoldSecond, foldLimit = foldLimitAt[arc];
+                float fold1 = foldPhase[arc] + ph, fold2 = ph * 2f - foldPhase2[arc], shift = rayShift[arc];
+                float curlFrom = CurlFrom - CurlMore * stormAt[arc], curlFull = CurlFull - CurlMore * stormAt[arc];
+                // in a recovery its patches go out and back: how far out they are now
+                float dip = pulses[arc] > 0f ? pulses[arc] * (1f - PulseOn(time, ph)) : 0f;
+                rowColours[3] = upperRow[arc];
+                rowColours[4] = topRow[arc];
+                float hemA = hemAlpha[arc];
                 for (int c = 0; c < Columns; c++)
                 {
                     float u = c / (float)(Columns - 1);
                     int column = k * Columns + c;
                     float s = pathS[column], nx = acrossX[column], nz = acrossZ[column];
-                    float fold = Mathf.Clamp(55f * Mathf.Sin(s / 420f + time * 0.25f + ph) + 22f * Mathf.Sin(s / 150f - time * 0.6f + ph * 2f),
-                        -FoldLimit, FoldLimit);
+                    float fold = Mathf.Clamp(foldHigh * Mathf.Sin(s / 420f + fold1) + foldLow * Mathf.Sin(s / 150f + fold2), -foldLimit, foldLimit);
                     float bottom = 220f + 70f * Mathf.Sin(s / 900f + ph);
                     // 1.5 times the first height (the user, 2026-10-25: "increase the overall size of aurora so it don't look too
                     // small from all the rag")
@@ -3641,14 +5157,16 @@ namespace BetterStorm
                     if (edges)
                     {
                         float along = noiseAt[column];
-                        curlAt[column] = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(CurlFrom, CurlFull,
+                        curlAt[column] = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(curlFrom, curlFull,
                             Mathf.PerlinNoise(along / 1800f + k * 2.9f, time * 0.02f + 40f)));
                         pulseAt[column] = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(PulseFrom, PulseFull,
                             Mathf.PerlinNoise(along / 700f + k * 4.1f, time * 0.05f + 60f)));
+                        float hue = Mathf.Clamp01((Mathf.PerlinNoise(along / HueScale + k * 1.7f, time * HueDrift + 80f) - 0.5f) * 1.5f + 0.5f);
+                        greenAt[column] = (byte)Mathf.Min(GreenSteps - 1, (int)(hue * GreenSteps));
                     }
 
                     float strength = ends * Mathf.Sqrt(ends) * (0.55f + 0.45f * Mathf.PerlinNoise(s / 260f + time * 0.3f, ph)) * arcStrength *
-                        (1f + PulseDepth * pulseAt[column] * pulse);
+                        (1f - dip * pulseAt[column]);
                     // the curl: across the curtain (out from the centre on the arcs) and along it; the curtain's place there
                     float swing = CurlReach * width * curlAt[column], wave = s / (CurlWave * width) * 2f * Mathf.PI - time * CurlSpeed + ph;
                     float across = fold + swing * Mathf.Sin(wave), alongBy = swing * Mathf.Cos(wave);
@@ -3662,8 +5180,9 @@ namespace BetterStorm
                     }
                     // a ragged lower edge (the user, 2026-10-25: "make the aurora bottom edge also have some irregular fade effect
                     // like real aurora, so it doesn't look cut off"; probe 8's ragged2, chosen by the user): each column starts
-                    // 300-1,600 over its base by two octaves of noise along the ring and fades in over 100-500, mostly above the
-                    // cloud's flat top (its puffs to 1,250), which drew a straight bottom edge over curtains starting at 150-290
+                    // 300-1,600 over its base by two octaves of noise along the ring and fades in over 100-500 (the storm cloud's flat
+                    // top, its puffs to 1,250, drew a straight bottom edge over curtains starting at 150-290; the fog bank since,
+                    // §4.3, its ragged top 360-540 at BankTop 450, meets the lowest columns)
                     if (edges)
                     {
                         float along = noiseAt[column];
@@ -3679,37 +5198,53 @@ namespace BetterStorm
                     // lowered by up to 35 % of its height, by two octaves of noise of their own
                     float top = bottom + height * (1f - edgeDrop[column]);
                     float full = Mathf.Min(bottom + lift + fade, top - 300f), rise = Mathf.Min(bottom + lift, full - 50f);
+                    // the colours (Substorms): the hem and the upper rows its section's, the green rows the column's shade; 4 bytes
+                    // a vertex to the GPU, the alpha set as a byte (the rows' strength can pass 1 in a breakup: held at 255)
+                    Color32 green = greenLow[greenAt[column]];
+                    rowColours[0] = hemA > 0f ? hemRow[arc] : green;   // quiet: a green hem, no pink fringe
+                    rowColours[1] = green;
+                    rowColours[2] = greenHigh[greenAt[column]];
+
+                    float rayAt = rayU[column] + shift;
                     for (int r = 0; r < Rows; r++)
                     {
                         int i = (k * Columns + c) * Rows + r;
                         float lean = RowHeight[r] * 120f;
                         float y = r == 0 ? rise : r == 1 ? full : Mathf.Lerp(full, top, (r - 1) / (float)(Rows - 2));
                         vertices[i] = new Vector3(px + nx * lean, y, pz + nz * lean);
-                        Color colour = RowColor[r];
-                        colour.a = RowAlpha[r] * strength;
-                        colors[i] = colour;   // 4 bytes a vertex to the GPU instead of 16
+                        Color32 colour = rowColours[r];
+                        float alpha = (r == 0 ? hemA : RowAlpha[r]) * strength;
+                        colour.a = alpha >= 1f ? (byte)255 : (byte)(alpha * 255f + 0.5f);
+                        colors[i] = colour;
+                        if (raysMoved)
+                        {
+                            uvs[i].x = rayAt;
+                        }
                     }
 
                     int slot = SkirtSlot(c);
                     for (int g = 0; slot >= 0 && g < SkirtRows; g++)
                     {
                         int i = SkirtIndex(k, slot, g);
-                        vertices[i] = new Vector3(px, SkirtY[g], pz);
-                        Color colour = RowColor[1];
-                        colour.a = SkirtAlpha[g] * skirt * strength;
+                        vertices[i] = new Vector3(px, SkirtY[g] * BankTop, pz);
+                        Color32 colour = green;
+                        float alpha = SkirtAlpha[g] * skirt * strength;
+                        colour.a = alpha >= 1f ? (byte)255 : (byte)(alpha * 255f + 0.5f);
                         colors[i] = colour;
                     }
 
-                    // the veil on its arc's own smooth line, from the curtains' upper part, leaning on with the curtain
-                    float veil = slot >= 0 ? VeilAlpha * arcStrength * clear * Mathf.Pow(ends, 0.75f) : 0f;
+                    // the veil on its arc's own smooth line, from the curtains' upper part, leaning on with the curtain; redder and
+                    // stronger with its section's red
+                    float veil = slot >= 0 ? VeilAlpha * veilGain[arc] * arcStrength * clear * Mathf.Pow(ends, 0.75f) : 0f;
                     float veilLine = slot >= 0 ? (3000f + VeilWave * Mathf.Sin(noiseAt[column] / 1600f + arc * 2.1f)) * arcHeight : 0f;
                     for (int g = 0; slot >= 0 && g < VeilRows; g++)
                     {
                         int i = VeilIndex(k, slot, g);
                         float up = veilLine * VeilAt[g], lean = fold + VeilSlope * up;
                         vertices[i] = new Vector3(pathX[column] + nx * lean, bottom + up, pathZ[column] + nz * lean);
-                        Color colour = VeilColour;
-                        colour.a = VeilShape[g] * veil;
+                        Color32 colour = veilColour[arc];
+                        float alpha = VeilShape[g] * veil;
+                        colour.a = alpha >= 1f ? (byte)255 : (byte)(alpha * 255f + 0.5f);
                         colors[i] = colour;
                     }
                 }
@@ -3717,6 +5252,139 @@ namespace BetterStorm
 
             mesh.vertices = vertices;
             mesh.colors32 = colors;
+            if (raysMoved)
+            {
+                mesh.uv = uvs;
+            }
+        }
+
+        // Each section's substorm this rebuild (the schedule on substormClock, real seconds) and what it drives: its brightness, its
+        // folds' height, limit and speed (moved on by `step`, the game's seconds since the last rebuild), its rays' slide, its
+        // pulses; at the edges' refresh its colours. True if a section's rays moved (the curtains' texture coordinates rewritten).
+        private bool Substorms(float step, bool edges)
+        {
+            float now = substormClock, real = Mathf.Max(0f, now - lastSubstorm);
+            lastSubstorm = now;
+            // the clock runs on while the aurora is out of sight or off screen, but this runs only while it is seen: a breakup that
+            // came due meanwhile is set from when it came due (it may be over, or half way), not from now, or every return to the
+            // aurora after its quiet time started one
+            while (now >= nextBreakup)
+            {
+                ScheduleBreakup(nextBreakup);
+            }
+
+            bool moved = false;
+            float seen = Mathf.Lerp(DayBreakup, 1f, nightLook);   // the share of a breakup's look shown (DayBreakup by day)
+            for (int a = 0; a < Sections; a++)
+            {
+                float quiet = Mathf.Lerp(QuietLow, QuietHigh, Mathf.Clamp01(Mathf.PerlinNoise(now * 0.01f, a * 3.3f + 11f)));
+                float activity = quiet, pulse = 0f, e = now - breakupAt[a];
+                float active = RiseSeconds + activeFor[a], end = active + recoverFor[a];
+                if (e >= 0f && e < end)
+                {
+                    if (e < RiseSeconds)
+                    {
+                        activity = Mathf.SmoothStep(quiet, 1f, e / RiseSeconds);
+                    }
+                    else if (e < active)
+                    {
+                        activity = 1f;
+                    }
+                    else
+                    {
+                        // the recovery: back to quiet, its patches pulsing (in over its first tenth, out over its last quarter)
+                        float p = (e - active) / recoverFor[a];
+                        activity = Mathf.SmoothStep(1f, quiet, p);
+                        pulse = Mathf.Clamp01(p / 0.1f) * Mathf.Clamp01((1f - p) / 0.25f);
+                    }
+                }
+
+                if (QaActivity >= 0f)
+                {
+                    activity = QaActivity;
+                }
+
+                if (QaPulses >= 0f)
+                {
+                    pulse = QaPulses;
+                }
+
+                red[a] = QaRed >= 0f ? QaRed : red[a] + (activity - red[a]) * (1f - Mathf.Exp(-real / RedLag));
+                float storm = Mathf.InverseLerp(QuietHigh, 1f, activity);
+                stormAt[a] = storm;
+                pulses[a] = pulse;
+                arcBright[a] = Mathf.Lerp(BrightQuiet, BrightBreakup, Mathf.Lerp(Mathf.Min(activity, QuietHigh), activity, seen));
+                foldHeight[a] = Mathf.Lerp(FoldQuiet, FoldBreakup, storm);
+                foldLimitAt[a] = Mathf.Lerp(FoldLimit, FoldLimitBreakup, storm);
+                float speedUp = Mathf.Lerp(1f, FoldSpeedUp, storm);
+                foldPhase[a] = Mathf.Repeat(foldPhase[a] + FoldSpeed * speedUp * step, 2f * Mathf.PI);
+                foldPhase2[a] = Mathf.Repeat(foldPhase2[a] + FoldSpeed2 * speedUp * step, 2f * Mathf.PI);
+                if (storm > 0f && step > 0f)
+                {
+                    rayShift[a] = Mathf.Repeat(rayShift[a] + ((a & 1) == 0 ? 1f : -1f) * RayRace * storm * step / RayTile, 1f);
+                    moved = true;
+                }
+
+                if (edges)
+                {
+                    // the red's share over quiet, as `storm` (the quiet colours as before)
+                    float reddened = Mathf.InverseLerp(QuietHigh, 1f, red[a]) * seen;
+                    hemRow[a] = Color.Lerp(RowColor[1], HemColour, storm * seen);
+                    hemAlpha[a] = HemAlpha * storm * seen;
+                    upperRow[a] = Color.Lerp(RowColor[3], UpperRed, reddened);
+                    topRow[a] = Color.Lerp(RowColor[4], TopRed, reddened);
+                    veilColour[a] = Color.Lerp(VeilColour, VeilRed, reddened);
+                    veilGain[a] = Mathf.Lerp(1f, VeilRedGain, reddened);
+                }
+            }
+
+            return moved;
+        }
+
+        // The next breakup at `now`: one section leads, the others start within FollowSeconds, each active and recovering for its own
+        // time; the one after it a quiet QuietMin-QuietMax s after the last has calmed.
+        private void ScheduleBreakup(float now)
+        {
+            int lead = substormRandom.Next(Sections);
+            float calm = now;
+            for (int a = 0; a < Sections; a++)
+            {
+                breakupAt[a] = now + (a == lead ? 0f : Mathf.Lerp(3f, FollowSeconds, (float)substormRandom.NextDouble()));
+                activeFor[a] = Mathf.Lerp(ActiveMin, ActiveMax, (float)substormRandom.NextDouble());
+                recoverFor[a] = Mathf.Lerp(RecoverMin, RecoverMax, (float)substormRandom.NextDouble());
+                calm = Mathf.Max(calm, breakupAt[a] + RiseSeconds + activeFor[a] + recoverFor[a]);
+            }
+
+            nextBreakup = calm + Mathf.Lerp(QuietMin, QuietMax, (float)substormRandom.NextDouble());
+        }
+
+        // A breakup now (the QA's pictures of one).
+        internal void StartBreakup()
+        {
+            nextBreakup = substormClock;
+        }
+
+        // 1 while a pulsing patch of the curtain with phase `ph` is on, 0 while off (PulseOn/Off s, its own), over PulseEdge between
+        private static float PulseOn(float time, float ph)
+        {
+            float on = Mathf.Lerp(PulseOnMin, PulseOnMax, Mathf.Repeat(ph * 1.7f, 1f));
+            float off = Mathf.Lerp(PulseOffMin, PulseOffMax, Mathf.Repeat(ph * 3.1f, 1f));
+            float x = Mathf.Repeat(time + ph * 7f, on + off);
+            return x >= on ? 0f : Mathf.Min(1f, Mathf.Min(x, on - x) / PulseEdge);
+        }
+
+        // The green rows' GreenSteps shades: from blue-green through the row's own green to yellow-green, GreenSpread of the way.
+        private void BuildGreens()
+        {
+            greenLow = new Color32[GreenSteps];
+            greenHigh = new Color32[GreenSteps];
+            for (int n = 0; n < GreenSteps; n++)
+            {
+                float t = ((n + 0.5f) / GreenSteps * 2f - 1f) * GreenSpread;
+                Color to = t >= 0f ? GreenYellow : GreenBlue;
+                greenLow[n] = Color.Lerp(RowColor[1], to, Mathf.Abs(t));
+                greenHigh[n] = Color.Lerp(RowColor[2], to, Mathf.Abs(t));
+            }
         }
 
         private void OnDestroy()
@@ -3746,6 +5414,107 @@ namespace BetterStorm
         }
     }
 
+    // A storm cloud faded out as a whole (LOOK_UPDATE_DRAFT.md §4.1): each of its systems' colour over lifetime with its alpha x the
+    // share left. The module applies to the live puffs at once, so nothing is done puff by puff; set again only when the share moves
+    // a FadeStep, and given back as found at 1.
+    internal sealed class PuffFade
+    {
+        private const float FadeStep = 1f / 32f;
+        private readonly List<ParticleSystem> systems = new List<ParticleSystem>();
+        private readonly List<bool> wasEnabled = new List<bool>();
+        private readonly List<ParticleSystem.MinMaxGradient> colours = new List<ParticleSystem.MinMaxGradient>();
+        private float applied = 1f;
+
+        internal void Add(ParticleSystem ps)
+        {
+            if (ps == null)
+            {
+                return;
+            }
+
+            ParticleSystem.ColorOverLifetimeModule colour = ps.colorOverLifetime;
+            systems.Add(ps);
+            wasEnabled.Add(colour.enabled);
+            colours.Add(colour.color);
+        }
+
+        internal ParticleSystemRenderer[] Renderers()
+        {
+            ParticleSystemRenderer[] renderers = new ParticleSystemRenderer[systems.Count];
+            for (int i = 0; i < systems.Count; i++)
+            {
+                renderers[i] = systems[i].GetComponent<ParticleSystemRenderer>();
+            }
+
+            return renderers;
+        }
+
+        internal void Set(float share)
+        {
+            share = share >= 1f ? 1f : Mathf.Max(0f, Mathf.Round(share / FadeStep) * FadeStep);
+            if (share == applied)
+            {
+                return;
+            }
+
+            applied = share;
+            for (int i = 0; i < systems.Count; i++)
+            {
+                if (systems[i] == null)
+                {
+                    continue;
+                }
+
+                ParticleSystem.ColorOverLifetimeModule colour = systems[i].colorOverLifetime;
+                colour.color = share >= 1f
+                    ? colours[i]
+                    : Faded(wasEnabled[i] ? colours[i] : new ParticleSystem.MinMaxGradient(Color.white), share);
+                colour.enabled = share < 1f || wasEnabled[i];
+            }
+        }
+
+        private static ParticleSystem.MinMaxGradient Faded(ParticleSystem.MinMaxGradient gradient, float share)
+        {
+            switch (gradient.mode)
+            {
+                case ParticleSystemGradientMode.Color:
+                    return new ParticleSystem.MinMaxGradient(Faded(gradient.color, share));
+                case ParticleSystemGradientMode.TwoColors:
+                    return new ParticleSystem.MinMaxGradient(Faded(gradient.colorMin, share), Faded(gradient.colorMax, share));
+                case ParticleSystemGradientMode.TwoGradients:
+                    return new ParticleSystem.MinMaxGradient(Faded(gradient.gradientMin, share), Faded(gradient.gradientMax, share));
+                default:   // a gradient, or a random colour from one
+                    ParticleSystem.MinMaxGradient faded = new ParticleSystem.MinMaxGradient(Faded(gradient.gradient, share));
+                    faded.mode = gradient.mode;
+                    return faded;
+            }
+        }
+
+        private static Color Faded(Color colour, float share)
+        {
+            colour.a *= share;
+            return colour;
+        }
+
+        private static Gradient Faded(Gradient gradient, float share)
+        {
+            if (gradient == null)
+            {
+                return null;
+            }
+
+            GradientAlphaKey[] alpha = gradient.alphaKeys;
+            for (int i = 0; i < alpha.Length; i++)
+            {
+                alpha[i].alpha *= share;
+            }
+
+            Gradient faded = new Gradient { mode = gradient.mode };
+            faded.SetKeys(gradient.colorKeys, alpha);
+            return faded;
+        }
+    }
+
     // A storm's eye (EYE_LAYER_DRAFT.md §5, the user, 2026-10-25): a clear sky inside a straight cloud wall, weak wind (3 at
     // the centre, 7 at the wall), the full storm wind and the lightning from the wall's inner side out. One shape for the
     // Hurricane, one for the game's three storms. Pure maths: no Unity native calls. d = the distance from the storm's centre.
@@ -3763,8 +5532,19 @@ namespace BetterStorm
         // 1,879, a puffy white top over a darker base, run 20261027-185238)
         internal static readonly StormEyeShape GameStorm = new StormEyeShape("game storm", 1600f, 3);
 
-        // the game's radius (3,000) + the largest range (12,000): the cloud shows to the outer edge (the game's 5,500 ends inside it)
-        internal const float GameStormCloudDistance = 15000f;
+        // the game's radius (3,000) + the largest range (12,000): their largest outer edge, out to which their thunder is heard
+        internal const float GameStormOuterEdge = 15000f;
+        // their storm cloud seen within this of their centre (LOOK_UPDATE_DRAFT.md §4.1; the user, 2026-10-31: "make hurricane visible
+        // from 12km instead, start building", at once "sorry not hurricane, i mean vanilla storm"; to their outer edge, 15,000, before,
+        // the game's own 5,500), fading into the haze over its last SightFade
+        internal const float GameStormCloudDistance = 12000f;
+        // far clouds (a game storm's, the mist's and its aurora) fade into the haze over this last stretch before their sight limit
+        internal const float SightFade = 1500f;
+        // the fade's look: the cloud's tone toward the fog colour and the cloud faded out (PuffFade), its puffs' alpha x (1 - haze) ^
+        // this. At 1 a thick deck (many puffs over each other) stayed nearly solid until its last few hundred metres (probe 22, run
+        // 20261031-224027); the user picked 2, thinning earlier (2026-10-31: "3 Thin out early (Recommended)", of 1 the tone only, 2
+        // faded out at 1, 3 faded out at 2; p30b-2)
+        internal const float FadeCurve = 2f;
         internal const float CentreWind = 3f;                   // "hurrican eye wind speed also 3 at center, 7 at edge"
         internal const float EdgeWind = 7f;
         internal const float ExitMargin = 25f;                  // the wind leaves the eye only 25 past its edge: no flicker on the line
@@ -3867,6 +5647,20 @@ namespace BetterStorm
             FrontTiers = frontTiers;
         }
 
+        // the share of a far cloud's alpha left by `haze` (FadeCurve)
+        internal static float FadeShare(float haze)
+        {
+            return Mathf.Pow(Mathf.Clamp01(1f - haze), FadeCurve);
+        }
+
+        // 0 out to the fade's start (`limit` less SightFade, or `from` when farther: a cloud is never faded over its own deck), 1 at
+        // `limit`: how far a far cloud has gone into the haze
+        internal static float Haze(float distance, float limit, float from = 0f)
+        {
+            float start = Mathf.Clamp(from, limit - SightFade, limit - 100f);
+            return Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(start, limit, distance));
+        }
+
         // 1 in the eye, 0 outside its edge: the sky, the rain, the clouds and their tone; 0 everywhere without an eye
         internal float Clearness(float d)
         {
@@ -3933,8 +5727,9 @@ namespace BetterStorm
     }
 
     // The eye's sky: the game's storm blend (WeatherStorms.ApplyStorm) with the depth raised to the eye's clearness, so
-    // the eye is the region's clear weather and the wall runs back through cloudy and rain to storm. The game's
-    // GetNormalizedDistance is not changed: other mods (Climate's pressure) still see the storm's full depth.
+    // the eye is the region's clear weather and the wall runs back through cloudy and rain to storm, its volumetric fog
+    // (0.40) blended the same way. The game's GetNormalizedDistance is not changed: other mods (Climate's pressure) still
+    // see the storm's full depth.
     internal static class StormEyeWeather
     {
         internal static bool Apply(StormInfluence influence)
@@ -3952,25 +5747,51 @@ namespace BetterStorm
             float cloudyBorder = StormAccess.CloudyBorder(storms);
             float rainBorder = StormAccess.RainBorder(storms);
             ref WeatherSet blended = ref StormAccess.BlendedSet(storms);
+            VolufogSet fog;
             if (n >= 1f)
             {
                 WeatherSet.CopyFrom(ref blended, region.clearWeather, false);
+                fog = region.clearVolufog;
             }
             else if (n > cloudyBorder)
             {
-                WeatherSet.BlendSets(ref blended, region.clearWeather, region.cloudyWeather, Mathf.InverseLerp(1f, cloudyBorder, n));
+                float t = Mathf.InverseLerp(1f, cloudyBorder, n);
+                WeatherSet.BlendSets(ref blended, region.clearWeather, region.cloudyWeather, t);
+                fog = LerpVolufog(region.clearVolufog, region.cloudyVolufog, t);
             }
             else if (n > rainBorder)
             {
-                WeatherSet.BlendSets(ref blended, region.cloudyWeather, region.rainWeather, Mathf.InverseLerp(cloudyBorder, rainBorder, n));
+                float t = Mathf.InverseLerp(cloudyBorder, rainBorder, n);
+                WeatherSet.BlendSets(ref blended, region.cloudyWeather, region.rainWeather, t);
+                fog = LerpVolufog(region.cloudyVolufog, region.rainVolufog, t);
             }
             else
             {
-                WeatherSet.BlendSets(ref blended, region.rainWeather, region.stormWeather, Mathf.InverseLerp(rainBorder, 0f, n));
+                float t = Mathf.InverseLerp(rainBorder, 0f, n);
+                WeatherSet.BlendSets(ref blended, region.rainWeather, region.stormWeather, t);
+                fog = LerpVolufog(region.rainVolufog, region.stormVolufog, t);
             }
 
+            ApplyVolufog(fog);
             weather.ChangeWeather(blended);
             return true;
+        }
+
+        // 0.40's volumetric fog, which the game applies only in WeatherStorms.ApplyStorm (with each weather blend), so each
+        // path that skips ApplyStorm applies its own set. The game makes the region's sets with `new` (VolufogSet.LerpSets in
+        // RegionBlender every frame), and such an object reads as null to Unity's ==: they are tested by reference.
+        internal static void ApplyVolufog(VolufogSet set)
+        {
+            VolufogManager manager = VolufogManager.instance;
+            if ((object)set != null && manager != null)
+            {
+                manager.ApplySet(set);
+            }
+        }
+
+        internal static VolufogSet LerpVolufog(VolufogSet from, VolufogSet to, float t)
+        {
+            return (object)from == null || (object)to == null ? null : VolufogSet.LerpSets(from, to, t);
         }
     }
 
@@ -4103,6 +5924,11 @@ namespace BetterStorm
         private Color appliedTint = Color.white;
         private float wallFudge = float.NaN, layerFudge = float.NaN;
         private readonly float[] frontShades = new float[FrontBright.Length];
+        // a game storm's cloud seen only within StormEyeShape.GameStormCloudDistance of its centre (§4.1, UpdateLook): its share of the
+        // way into the haze, its puffs' fade, its renderers on
+        private float haze;
+        private PuffFade fade;
+        private bool cloudDrawn = true;
 
         internal StormEyeShape Shape { get; private set; }
 
@@ -4284,6 +6110,12 @@ namespace BetterStorm
 
             eye.saved.CloudDistance = distance;
             StormAccess.ParticleDistance(storm) = StormEyeShape.GameStormCloudDistance;
+            eye.fade = new PuffFade();
+            eye.fade.Add(eye.layer);
+            for (int i = 0; i < eye.fronts.Count; i++)
+            {
+                eye.fade.Add(eye.fronts[i].Particles);
+            }
         }
 
         // Takes a game storm's storm cloud off at once and puts its layer and cloud distance back (Better Storm's shutdown).
@@ -4328,8 +6160,10 @@ namespace BetterStorm
                 shape.scale = s.ShapeScale;
             }
 
+            eye.fade?.Set(1f);   // the layer's own colour over its life
             if (eye.layerRenderer != null)
             {
+                eye.layerRenderer.enabled = true;
                 eye.layerRenderer.sharedMaterial = s.Material;
                 eye.layerRenderer.flip = s.Flip;
                 eye.layerRenderer.sortingFudge = s.Fudge;
@@ -4588,6 +6422,20 @@ namespace BetterStorm
             white.a = 1f;
             dark.a = 1f;
             wallDark.a = 1f;
+            // a game storm's cloud seen within GameStormCloudDistance of its centre (LOOK_UPDATE_DRAFT.md §4.1): over its last SightFade
+            // (never over its own deck: in Emerald and the Lagoon the full-cloud line, 10,920, is past the fade's start) its tones toward
+            // the fog colour (Hazed) and its puffs faded out (FadeShare); past the limit not drawn
+            haze = Shape.HasEye ? 0f : StormEyeShape.Haze(distance, StormEyeShape.GameStormCloudDistance, ringOuter);
+            ShowCloud(haze < 1f);
+            fade?.Set(StormEyeShape.FadeShare(haze));
+            if (!cloudDrawn)
+            {
+                // a game storm's cloud past its sight limit (the Hurricane's is always drawn): nothing of it is drawn, so its tones and
+                // draw order (36 front sectors' bounds read and fudges set) wait, set again below the frame it shows; its puffs' sun
+                // tint goes on, as they live on (the eyes' LateUpdate took 110-122 us a frame for 4 storms, BetterStorm_TEST_RESULTS.md)
+                UpdateSunTint();
+                return;
+            }
 
             if (cloudClear != null)
             {
@@ -4597,7 +6445,7 @@ namespace BetterStorm
                 {
                     Color layerWhite = white * LayerBright;
                     layerWhite.a = white.a;
-                    cloudClear.SetColor(EmisColorId, Color.Lerp(dark, layerWhite, whiteness));
+                    cloudClear.SetColor(EmisColorId, Hazed(Color.Lerp(dark, layerWhite, whiteness)));
                 }
 
                 // the front's tones by height, their spread about their mean falling far off (FarToneShare)
@@ -4902,9 +6750,52 @@ namespace BetterStorm
         {
             bool own = !clear || tier.Clear == null;
             Use(tier.Renderer, own ? this.own : tier.Clear);
-            if (!own)
+            // a front tier's sectors share its first sector's material (AddTier): set once, from the first
+            if (!own && tier.Sector == 0)
             {
-                tier.Clear.SetColor(EmisColorId, Color.Lerp(dark, Shaded(white, tier.Index, brights), whiteness));
+                tier.Clear.SetColor(EmisColorId, Hazed(Color.Lerp(dark, Shaded(white, tier.Index, brights), whiteness)));
+            }
+        }
+
+        // a cloud colour toward the fog's (deckFog) by the cloud's share of the way into the haze
+        private Color Hazed(Color colour)
+        {
+            if (haze <= 0f)
+            {
+                return colour;
+            }
+
+            Color hazed = Color.Lerp(colour, deckFog, haze);
+            hazed.a = colour.a;
+            return hazed;
+        }
+
+        // the storm cloud's renderers on or off (a game storm's past its sight limit, UpdateLook)
+        private void ShowCloud(bool drawn)
+        {
+            if (drawn == cloudDrawn)
+            {
+                return;
+            }
+
+            cloudDrawn = drawn;
+            if (layerRenderer != null)
+            {
+                layerRenderer.enabled = drawn;
+            }
+
+            ShowTiers(walls, drawn);
+            ShowTiers(fronts, drawn);
+        }
+
+        private static void ShowTiers(List<Tier> tiers, bool drawn)
+        {
+            for (int i = 0; i < tiers.Count; i++)
+            {
+                if (tiers[i].Renderer != null)
+                {
+                    tiers[i].Renderer.enabled = drawn;
+                }
             }
         }
 
@@ -5172,25 +7063,33 @@ namespace BetterStorm
     {
         internal const float CoreRadius = 3500f;
         internal const float OuterEdge = 7000f;
-        // its storm cloud (fog-free) and aurora are seen out to the camera's far clip (21,500), even near land (the user, 2026-10-25)
-        internal const float CloudDistance = 21500f;
+        // its storm cloud (fog-free) and aurora seen within this of its centre, even near land, fading into the haze over the last
+        // StormEyeShape.SightFade (LOOK_UPDATE_DRAFT.md §4.1; the user, 2026-10-31: "currently too many people report they can see aurora
+        // all the time, the fog bank and the aurora shouldn't be seen from too far away", then of 8, 10, 12 or 15 km "12km"; 2026-11-01:
+        // "Aurora and it's mist showing distance to 9km", then "change the aurora and mist to 9.5km visible, still release as 1.2.2"), so
+        // seen whole only within 8,000, 1,000 outside its outer edge (7,000); out to the camera's far clip (21,500) before 1.2.2, 12,000
+        // in its first build
+        internal const float CloudDistance = 9500f;
         // its storm cloud wraps the aurora (the user: "the storm for mist should be bigger than aurora, so you can see aurora
         // going in and out of the storm"): a disc inside the ring and a ring just outside it, low enough that the curtains'
         // tops (1,700-2,800) stand over it (probe 7, 2026-10-25: 4,200 puffs 1,250 deep hid the curtains whole). The ring
         // hugs the curtains (3,420-3,700 with their folds and lean): its puffs' visible edge ends about 500 past the circle
         // (the user: "storm match with aurora width, storm only goes out a little bit of aurora"; it reached 4,900 before)
-        internal const float CloudBottom = 200f;
-        internal const float CloudDepth = 900f;
-        internal const float CloudPuffMin = 400f;
-        internal const float CloudPuffMax = 1000f;
-        internal const float CloudInnerRadius = 3350f;
-        internal const int CloudInnerPuffs = 1600;
-        internal const float CloudRingInner = 3600f;
-        internal const float CloudRingOuter = 3850f;
-        internal const int CloudRingPuffs = 350;
+        // its cloud a low sea-fog bank since (LOOK_UPDATE_DRAFT.md §4.3; the user, 2026-10-31: "Make magnetic storm cloud more like
+        // floating mist from outside, instead of current vanilla storm cloud particle", then of the looks offered "Low fog bank
+        // (Recommended)": "a flat-topped white-grey wall about 300 m tall sitting on the sea, ragged shreds at its edge that keep
+        // changing, a slow drift, the aurora well above it"), on the same footprint: a wall round the curtains and a flat top inside
+        // it (MistAurora.ShapeBank). Fewer puffs than the storm cloud before it (1,600 in the disc, 350 in a ring 3,600-3,850, 400-1,000
+        // across at 200-1,100 over the sea): from the sea the wall hides the inside
+        internal const float BankWallInner = 3300f;
+        internal const float BankWallOuter = 3850f;
+        internal const int BankWallPuffs = 900;
+        internal const float BankTopRadius = 3350f;
+        internal const int BankTopPuffs = 500;
         internal const float WanderSpeed = 20f;                // about 38.9 knots (the user, 2026-10-27: "speed 20"; 18 from 2026-10-25, 16 before)
-        // 16 knots (the user, 2026-10-24) = 8.23 units/s; the game's Speedometer: knots = speed x 1.944
-        internal const float FollowSpeed = 16f / 1.944f;
+        // 20 knots (the user, 2026-11-02: "increase the following speed to 20 knots"; 16 from 2026-10-24) = 10.29 units/s; the game's
+        // Speedometer: knots = speed x 1.944. Also a free mist's drift while the player is inside its outer edge (DriftSpeed)
+        internal const float FollowSpeed = 20f / 1.944f;
         // how long it follows: the config "Follow Time", one of these (the user, 2026-10-25)
         internal const int DefaultFollowHours = 48;
         internal static readonly int[] FollowHourOptions = { 12, 24, 48, 72 };
@@ -5201,6 +7100,9 @@ namespace BetterStorm
         internal const float MaxWanderDegrees = 150f;
         internal const float SpinDegreesPerSecond = 120f;
         internal const float SpinBlendDistance = 200f;
+        // the ship's clock's hour hand spins at this share of the minute hand's spin, the same way (the user, 2026-11-02: "make the
+        // spinning of clock in core also spin both the minute and hour", then "3 Half speed, same way"; 1/12 before, the clock's gearing)
+        internal const float HourHandSpinShare = 0.5f;
         internal const float CoreCloudMultiplier = 2f;
         internal const float FogStart = OuterEdge;             // the fog starts at the outer edge
         // the user, 2026-10-27: "lower to 0.25 and release as 1.2.1 again" (0.3 from 2026-10-25, 0.35 first; 0.2 is the game's thickest)
@@ -5217,16 +7119,27 @@ namespace BetterStorm
             return Mathf.InverseLerp(OuterEdge, CoreRadius, distance);
         }
 
-        // 0 at 7,000 -> 1 at 3,500 (the same curve as m)
-        internal static float FogFactor(float distance)
+        // The fog line (LOOK_UPDATE_DRAFT.md §4.3; the user, 2026-10-31: "make fog strength be at 0.08 at 4500, in crease linearly from
+        // 7000", and their pick "Mist fog closes at wall"): from the fog already there at 7,000 straight up to BandFog at BandFogAt,
+        // from there to the peak at the bank's wall (BankWallOuter), the peak on to the core; never lowering the fog already there.
+        // A straight line from 7,000 to the peak at the core (3,500) before.
+        internal const float BandFog = 0.08f;
+        internal const float BandFogAt = 4500f;
+
+        internal static float MistFog(float current, float distance)
         {
-            return Mathf.InverseLerp(FogStart, CoreRadius, distance);
+            float band = Mathf.Max(current, BandFog), peak = Mathf.Max(current, MistFogPeak);
+            float fog = distance >= BandFogAt
+                ? Mathf.Lerp(current, band, Mathf.InverseLerp(FogStart, BandFogAt, distance))
+                : Mathf.Lerp(band, peak, Mathf.InverseLerp(BandFogAt, BankWallOuter, distance));
+            return Mathf.Max(current, fog);
         }
 
-        // never lowers the fog already there
-        internal static float MistFog(float current, float peak, float factor)
+        // the fog dome's strength: its share of the way to the peak on the same line from no fog (0 at 7,000, 0.32 at 4,500, 1 from
+        // the wall in)
+        internal static float FogFactor(float distance)
         {
-            return Mathf.Max(current, Mathf.Lerp(current, peak, factor));
+            return MistFog(0f, distance) / MistFogPeak;
         }
 
         internal static bool IsPaused(double now, double pauseUntil)
@@ -5285,6 +7198,14 @@ namespace BetterStorm
         internal static bool IsOpenOcean(bool wasOpen, float distanceToLand)
         {
             return distanceToLand >= OpenOceanDistance + (wasOpen ? 0f : OpenOceanOnMargin);
+        }
+
+        // A free mist's speed with the wind (the user, 2026-11-02: "make when player is in the outer edge, the speed of the mist become
+        // following speed"): the follow speed while the player is inside its outer edge, the wander speed outside it. A released mist
+        // leaves at the wander speed wherever the player is ("Keep the leave fast (Recommended)")
+        internal static float DriftSpeed(bool leaving, float distance)
+        {
+            return !leaving && distance < OuterEdge ? FollowSpeed : WanderSpeed;
         }
 
         internal static float SpinBlend(float distance)
@@ -5441,7 +7362,7 @@ namespace BetterStorm
             Vector3 toPlayer = player.position - mist.position;
             toPlayer.y = 0f;
             float distance = toPlayer.magnitude;
-            // it captures only on crossing its core inward; in the band it wanders
+            // it captures only on crossing its core inward; in the band it wanders, at the follow speed
             bool insideNow = controller.Storm.active && distance < MagneticMistRules.CoreRadius;
             if (syncInside)
             {
@@ -5486,7 +7407,7 @@ namespace BetterStorm
                 Vector3 direction = leaving
                     ? MagneticMistRules.LeaveDirection(-toPlayer, Wind.currentWind)
                     : Wind.currentWind.normalized;
-                mist.Translate(direction * Time.deltaTime * MagneticMistRules.WanderSpeed, Space.World);
+                mist.Translate(direction * Time.deltaTime * MagneticMistRules.DriftSpeed(leaving, distance), Space.World);
                 // the other storms looked at only when all else allows a capture (as an argument, a loop over every storm each frame)
                 if (haveClock &&
                     MagneticMistRules.ShouldCapture(
@@ -5768,7 +7689,13 @@ namespace BetterStorm
     {
         private static readonly AccessTools.FieldRef<Compass, Vector3> LockAxis =
             AccessTools.FieldRefAccess<Compass, Vector3>("lockAxis");
+        private const int DialSeed = 7919;   // added to a clock's seed: its dial wanders and spins apart from a compass
         private static float spinAngle;
+        private static float hourSpinAngle;   // the clocks' hour hands' spin, MagneticMistRules.HourHandSpinShare of spinAngle's
+        // the wobble's own clock: it advances at the pace now (MagneticMistRules.NoiseFrequency) while the field is on. Time.time x the
+        // pace before, which raced through the noise whenever the pace (the distance) changed, the more the longer the game had run
+        // (BetterStorm_FAILED.md, "The instruments' wobble pace"); a double, so a slow pace still adds after hours in the band
+        private static double noisePhase;
 
         internal static float Strength { get; private set; }   // m, 0 when outside or switched off
         internal static float Spin { get; private set; }       // 0..1, the core blend
@@ -5789,14 +7716,22 @@ namespace BetterStorm
             }
 
             float dt = Time.deltaTime;
+            if (Strength > 0f)
+            {
+                noisePhase += MagneticMistRules.NoiseFrequency(Strength) * dt;
+            }
+
             if (Spin > 0f)
             {
-                spinAngle = Mathf.Repeat(spinAngle + MagneticMistRules.SpinDegreesPerSecond * Spin * dt, 360f);
+                float turn = MagneticMistRules.SpinDegreesPerSecond * Spin * dt;
+                spinAngle = Mathf.Repeat(spinAngle + turn, 360f);
+                hourSpinAngle = Mathf.Repeat(hourSpinAngle + turn * MagneticMistRules.HourHandSpinShare, 360f);
             }
             else
             {
                 // settle back instead of keeping a frozen offset after leaving the core
                 spinAngle = Mathf.MoveTowardsAngle(spinAngle, 0f, 60f * dt);
+                hourSpinAngle = Mathf.MoveTowardsAngle(hourSpinAngle, 0f, 60f * dt);
             }
         }
 
@@ -5806,10 +7741,14 @@ namespace BetterStorm
             return Strength > 0f && LockAxis(compass) == new Vector3(0f, 1f, 0f);
         }
 
+        // the band's wander, faded out as the core's steady spin comes in (Spin, the last 200 outside the core radius): in the core
+        // only the spin (the user, 2026-11-02: "when pass over the magentic mist's core radius, please just make compass and
+        // chornometer keep spinning"; its wander, up to ±150° at the noise's fastest, about 1 Hz, could turn a needle faster than the
+        // 120°/s spin and back). The compasses' magnetism (1-4) trails the spin by 30-120°, under the half turn where a slerp turns back
         internal static float CompassOffsetDegrees(int seed)
         {
             float m = Strength;
-            return MagneticMistRules.WanderAmplitude(m) * Noise(seed, MagneticMistRules.NoiseFrequency(m)) +
+            return MagneticMistRules.WanderAmplitude(m) * (1f - Spin) * Noise(seed) +
                 Direction(seed) * spinAngle;
         }
 
@@ -5817,12 +7756,20 @@ namespace BetterStorm
         // compass-sized angle, with its own seed.
         internal static float DialOffsetDegrees(int seed)
         {
-            return Strength > 0f ? CompassOffsetDegrees(seed + 7919) : 0f;
+            return Strength > 0f ? CompassOffsetDegrees(seed + DialSeed) : 0f;
         }
 
-        private static float Noise(int seed, float frequency)
+        // A clock's hour hand, given its dial angle (DialOffsetDegrees with the same seed): the band's wander geared down as on a
+        // clock (1/12 of the minute hand), the core's spin at HourHandSpinShare of the minute hand's, the same way.
+        internal static float HourHandDegrees(int seed, float dialDegrees)
         {
-            return Mathf.PerlinNoise((seed % 997) * 0.37f, Time.time * frequency) * 2f - 1f;
+            float direction = Direction(seed + DialSeed);
+            return (dialDegrees - direction * spinAngle) / 12f + direction * hourSpinAngle;
+        }
+
+        private static float Noise(int seed)
+        {
+            return Mathf.PerlinNoise((seed % 997) * 0.37f, (float)noisePhase) * 2f - 1f;
         }
 
         private static float Direction(int seed)
@@ -5902,11 +7849,12 @@ namespace BetterStorm
 
             // vanilla: hour hand globalTime x 30, minute hand globalTime x 360 (once a game minute);
             // the minute hand is turned by the compass-sized angle (360° an hour), the hour hand
-            // follows it; after the player leaves, the minute hand corrects itself at its next tick
-            float hours = Sun.sun.globalTime +
-                MagneticField.DialOffsetDegrees(__instance.GetInstanceID()) / 360f;
-            HourHand(__instance).localEulerAngles = new Vector3(hours * 30f + 90f, -90f, 90f);
-            MinuteHand(__instance).localEulerAngles = new Vector3(hours * 360f + 90f, -90f, 90f);
+            // follows it in the band and spins at half its speed in the core (MagneticField.HourHandDegrees);
+            // after the player leaves, the minute hand corrects itself at its next tick
+            int seed = __instance.GetInstanceID();
+            float hours = Sun.sun.globalTime, degrees = MagneticField.DialOffsetDegrees(seed);
+            HourHand(__instance).localEulerAngles = new Vector3(hours * 30f + MagneticField.HourHandDegrees(seed, degrees) + 90f, -90f, 90f);
+            MinuteHand(__instance).localEulerAngles = new Vector3(hours * 360f + degrees + 90f, -90f, 90f);
         }
     }
 
@@ -6142,23 +8090,25 @@ namespace BetterStorm
         private static float moonOriginal = -1f;
 
         internal static float Depth { get; private set; }   // m while the mist is in control, else 0
+        // the sky's cover: the larger of Depth and Gentle Snow's overcast (LOOK_UPDATE_DRAFT.md §4.5), which hides the sun's shadows,
+        // the sun disc, the stars, the moon and the rainbow as the mist does
+        internal static float Cover { get; private set; }
         internal static bool MoonHidden { get; set; }
 
         internal static void Tick()
         {
-            Depth = StormInfluenceService.TryGetCurrent(out StormInfluence influence) &&
-                influence.IsMagneticMist
-                ? influence.WeatherLerp
-                : 0f;
+            bool inStorm = StormInfluenceService.TryGetCurrent(out StormInfluence influence);
+            Depth = inStorm && influence.IsMagneticMist ? influence.WeatherLerp : 0f;
+            Cover = Mathf.Max(Depth, inStorm && influence.IsGentleSnow ? GentleSnowRules.Overcast(influence.CenterDistance) : 0f);
             Track(ref sun, ref sunOriginal, Sun.sun != null ? Sun.sun.GetComponent<Light>() : null);
             Track(ref moon, ref moonOriginal, Moon.instance != null ? Moon.instance.moonlightWorld : null);
             if (sun != null)
             {
-                sun.shadowStrength = sunOriginal * (1f - Depth);
+                sun.shadowStrength = sunOriginal * (1f - Cover);
             }
             if (moon != null)
             {
-                moon.shadowStrength = moonOriginal * (1f - Depth);
+                moon.shadowStrength = moonOriginal * (1f - Cover);
             }
         }
 
@@ -6181,6 +8131,7 @@ namespace BetterStorm
         internal static void Restore()
         {
             Depth = 0f;
+            Cover = 0f;
             if (sun != null && sunOriginal >= 0f)
             {
                 sun.shadowStrength = sunOriginal;
@@ -6806,7 +8757,7 @@ namespace BetterStorm
         [HarmonyPostfix]
         private static void Postfix(Stars __instance)
         {
-            float k = 1f - MagneticSky.Depth;
+            float k = 1f - MagneticSky.Cover;
             Renderer renderer = StarsRenderer(__instance);
             if (k >= 1f || renderer == null)
             {
@@ -6835,7 +8786,7 @@ namespace BetterStorm
                 return;
             }
 
-            float k = 1f - MagneticSky.Depth;
+            float k = 1f - MagneticSky.Cover;
             bool hide = k <= 0.001f;
             if (hide && renderer.enabled)
             {
@@ -6879,7 +8830,7 @@ namespace BetterStorm
                 return;
             }
 
-            float k = 1f - MagneticSky.Depth;
+            float k = 1f - MagneticSky.Cover;
             if (k >= 1f)
             {
                 return;
@@ -6912,7 +8863,7 @@ namespace BetterStorm
         [HarmonyAfter(new[] { BetterStormPlugin.RealisticSkiesGuid })]
         private static void Postfix()
         {
-            RealisticSkiesCompatibility.Fade(1f - MagneticSky.Depth);
+            RealisticSkiesCompatibility.Fade(1f - MagneticSky.Cover);
         }
     }
 
@@ -7063,6 +9014,9 @@ namespace BetterStorm
         private static bool sunDiskOff;
         private static float nextCloudFade;
         private static ParticleSystem.Particle[] cloudBuffer;
+        private const float FarFadeInterval = 0.25f;
+        private static float nextFarFade;
+        private static bool lowFaded;   // the low layer's live puffs carry Gentle Snow's far fade
 
         internal static void Apply(ParticleSystem lowerClouds, ParticleSystem upperClouds)
         {
@@ -7109,11 +9063,8 @@ namespace BetterStorm
 
             if (inStorm && influence.IsMagneticMist)
             {
-                // from the fog already there at 7,000 to the peak (0.25) at the core radius
-                RenderSettings.fogDensity = MagneticMistRules.MistFog(
-                    RenderSettings.fogDensity,
-                    MagneticMistRules.MistFogPeak,
-                    MagneticMistRules.FogFactor(influence.CenterDistance));
+                // from the fog already there at 7,000 up to 0.08 at 4,500 and the peak (0.25) at the bank's wall (MistFog)
+                RenderSettings.fogDensity = MagneticMistRules.MistFog(RenderSettings.fogDensity, influence.CenterDistance);
             }
 
             float m = MagneticSky.Depth;
@@ -7128,7 +9079,74 @@ namespace BetterStorm
                 AtLeast(upperClouds, density * 2f);
             }
 
-            ApplySunDisk(m);
+            float snowOvercast = inStorm && influence.IsGentleSnow ? GentleSnowRules.Overcast(influence.CenterDistance) : 0f;
+            if (snowOvercast > 0f)
+            {
+                // Gentle Snow's low layer fewer (GentleSnowLightPatch.LowerClouds), by day and night alike
+                float lower = Mathf.Lerp(1f, GentleSnowLightPatch.LowerClouds, snowOvercast);
+                if (lower < 1f)
+                {
+                    Scale(lowerClouds, lower);
+                    if (Time.time >= nextCloudFade)
+                    {
+                        nextCloudFade = Time.time + CloudFadeInterval;
+                        FadeLiveClouds(lowerClouds, lower);
+                    }
+                }
+            }
+
+            FadeFarLowClouds(lowerClouds, snowOvercast);
+            ApplySunDisk(MagneticSky.Cover);
+        }
+
+        // Gentle Snow's low cloud layer faded low in the sky (GentleSnowLightPatch.LowFarAlpha): four times a second each live puff's
+        // alpha is set by how high its centre stands from the view, 1 from LowFadeHigh degrees up, the far share from LowFadeLow down,
+        // that share eased in by the overcast; so the puffs overhead keep their look and those toward the horizon thin into a shade of
+        // the grey behind them. Once the overcast is gone, a last pass gives every puff its full alpha back.
+        private static void FadeFarLowClouds(ParticleSystem lowerClouds, float overcast)
+        {
+            bool active = overcast > 0f && GentleSnowLightPatch.LowFarAlpha < 1f;
+            if (lowerClouds == null || (!active && !lowFaded) || Time.time < nextFarFade)
+            {
+                return;
+            }
+
+            nextFarFade = Time.time + FarFadeInterval;
+            Camera view = Camera.main;
+            if (view == null)
+            {
+                return;
+            }
+
+            ParticleSystem.MainModule main = lowerClouds.main;
+            if (cloudBuffer == null || cloudBuffer.Length < main.maxParticles)
+            {
+                cloudBuffer = new ParticleSystem.Particle[main.maxParticles];
+            }
+
+            int count = lowerClouds.GetParticles(cloudBuffer);
+            bool local = main.simulationSpace == ParticleSystemSimulationSpace.Local;
+            Transform frame = lowerClouds.transform;
+            Vector3 eye = view.transform.position;
+            float baseAlpha = main.startColor.color.a;
+            float far = active ? Mathf.Lerp(1f, GentleSnowLightPatch.LowFarAlpha, overcast) : 1f;
+            for (int i = 0; i < count; i++)
+            {
+                Vector3 p = local ? frame.TransformPoint(cloudBuffer[i].position) : cloudBuffer[i].position;
+                float dx = p.x - eye.x, dz = p.z - eye.z;
+                float up = Mathf.Atan2(p.y - eye.y, Mathf.Sqrt(dx * dx + dz * dz)) * Mathf.Rad2Deg;
+                float alpha = Mathf.Lerp(far, 1f, Mathf.InverseLerp(GentleSnowLightPatch.LowFadeLow, GentleSnowLightPatch.LowFadeHigh, up));
+                Color32 colour = cloudBuffer[i].startColor;
+                colour.a = (byte)Mathf.RoundToInt(Mathf.Clamp01(baseAlpha * alpha) * 255f);
+                cloudBuffer[i].startColor = colour;
+            }
+
+            if (count > 0)
+            {
+                lowerClouds.SetParticles(cloudBuffer, count);
+            }
+
+            lowFaded = active;
         }
 
         private static void ApplySunDisk(float m)

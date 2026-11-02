@@ -1,6 +1,6 @@
 // Better Storm's changes to every storm, the game's own included: the shared rain emitter and its indoor filtering, the
 // precipitation's shifting space, rain gameplay and audio, the storm wind curve, gusts and caps, lightning and the thunder
-// pool, and which storm controls the weather.
+// pool, which storm controls the weather, and the storm blend's own sky materials.
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -509,10 +509,13 @@ namespace BetterStorm
 
             bool insideSquall = influence.IsSquall;
             bool insideGentleSnow = influence.IsGentleSnow;
+            // Gentle Snow's own rules from its old edge, 4,500 (GentleSnowRules.InnerEdge; since the look update its wind is eased in
+            // from 8,000, GentleSnowWind): the fresh roll on crossing it, the gust interval by the old geometry, the smoothing
+            bool insideSnowCore = insideGentleSnow && GentleSnowRules.InCore(influence.CenterDistance);
             bool insideDoldrums = influence.IsDoldrums;
             bool insideEye = influence.Eye != null && StormEyeWind.InEye;
             if ((insideSquall && !wasInsideSquall) ||
-                (insideGentleSnow && !wasInsideGentleSnow))
+                (insideSnowCore && !wasInsideGentleSnow))
             {
                 StormAccess.WindTimer(wind) = 0f;
                 StormAccess.GustTimer(wind) = 0f;
@@ -524,9 +527,9 @@ namespace BetterStorm
                 : Mathf.Lerp(
                     normalGustInterval,
                     StormCoreGustInterval,
-                    influence.WindLerp);
+                    insideGentleSnow ? GentleSnowRules.CoreWindLerp(influence.CenterDistance) : influence.WindLerp);
             wind.finalLerpSpeed = insideGentleSnow
-                ? GentleSnowRules.FinalLerpSpeed
+                ? Mathf.Lerp(normalFinalLerpSpeed, GentleSnowRules.FinalLerpSpeed, GentleSnowRules.WindEase(influence.CenterDistance))
                 : insideDoldrums
                     ? DoldrumsRules.FinalLerpSpeed
                     : StormFinalLerpSpeed;
@@ -546,7 +549,7 @@ namespace BetterStorm
 
             overridesApplied = true;
             wasInsideSquall = insideSquall;
-            wasInsideGentleSnow = insideGentleSnow;
+            wasInsideGentleSnow = insideSnowCore;
         }
 
         internal static void NotifyDebugSummon(StormKind kind)
@@ -872,7 +875,22 @@ namespace BetterStorm
 
             if (influence.IsGentleSnow)
             {
-                ___currentGustTarget = ___currentWindTarget;
+                // from 4,500 in no gusts (as before the look update); from 8,000 to 4,500 the game's (x 0.67-1.33) eased toward
+                // none, and the orb's wind its vanilla gusts there, as High Pressure's
+                if (GentleSnowRules.InCore(influence.CenterDistance))
+                {
+                    ___currentGustTarget = ___currentWindTarget;
+                    return false;
+                }
+
+                if (WindTotemCompatibility.OrbControlsWind)
+                {
+                    return true;
+                }
+
+                float ease = GentleSnowRules.WindEase(influence.CenterDistance);
+                ___currentGustTarget = ___currentWindTarget *
+                    UnityEngine.Random.Range(Mathf.Lerp(0.67f, 1f, ease), Mathf.Lerp(1.33f, 1f, ease));
                 return false;
             }
 
@@ -1919,7 +1937,7 @@ namespace BetterStorm
             {
                 SandstormVisuals.Deactivate();
                 GentleSnowVisuals.ApplyWeather(influence, ___rain, ___outerRain, ___rainSplash);
-                RenderSettings.fogDensity = 0f;
+                // its light fog follows the overcast's blend (LOOK_UPDATE_DRAFT.md §4.5; 0 before the look update)
                 return;
             }
             SandstormVisuals.Deactivate();
@@ -1933,6 +1951,61 @@ namespace BetterStorm
                 CustomPrecipitationParticles.SetEmissionRate(___rainSplash, 0f);
                 GameState.rainIntensity = 0f;
             }
+        }
+    }
+
+    // The game's storm blend set (WeatherStorms.blendedSet) kept on sky materials of its own. In clear weather ApplyStorm copies the
+    // region's clear set into it by reference (WeatherSet.CopyFrom(..., false): the palettes are structs, but their sky materials are
+    // then the region's clear ones), and the next blend into it (WeatherSet.BlendSets, OceanColorPalette.CopyFrom's
+    // CopyPropertiesFromMaterial) is written into the region's clear sky. The game's region blender rewrites that sky only within
+    // 43,000-45,000 of the region's centre (RegionBlender.UpdateBlend), so farther out each blend, every 0.05 s, took the clear sky
+    // further toward the cloudy one, and it stayed so after the storm; BorderExpander (in the user's set) rewrites it every frame from
+    // its own copy instead, so between two blends the weather read the clear sky. Every write into the set comes inside ApplyStorm (the
+    // game's own body, the eye's sky StormEyeWeather.Apply, Gentle Snow's overcast GentleSnowClearWeatherPatch), so this runs first: the
+    // set's two sky materials handed back to its own, holding the values the set had. The user, 2026-11-02: "okay then i want to
+    // implement the sky fix, the vanilla clear sky blending one" (dropped earlier as an edge case, BetterStorm_FAILED.md).
+    [HarmonyPatch(typeof(WeatherStorms), "ApplyStorm")]
+    internal static class BlendedSkyPatch
+    {
+        private static Material ownDay, ownDawn;
+
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
+        private static void Prefix(WeatherSet ___blendedSet)
+        {
+            if (___blendedSet == null)
+            {
+                return;
+            }
+
+            ownDay = Own(ref ___blendedSet.dayPalette.skyMaterial, ownDay, "day");
+            ownDawn = Own(ref ___blendedSet.dawnPalette.skyMaterial, ownDawn, "dawn");
+        }
+
+        // `slot` set to `owned` (made from it the first time), holding the values `slot` had
+        private static Material Own(ref Material slot, Material owned, string label)
+        {
+            if (slot == null || slot == owned)
+            {
+                return owned;
+            }
+
+            if (owned == null)
+            {
+                owned = new Material(slot) { name = "Better Storm blended sky (" + label + ")", hideFlags = HideFlags.DontSave };
+            }
+            else
+            {
+                if (owned.shader != slot.shader)
+                {
+                    owned.shader = slot.shader;
+                }
+
+                owned.CopyPropertiesFromMaterial(slot);
+            }
+
+            slot = owned;
+            return owned;
         }
     }
 
@@ -2051,6 +2124,9 @@ namespace BetterStorm
         {
             if (boat != null) boats.Add(boat);
         }
+
+        // the listed boats (destroyed ones included until the next scan); GentleSnowBoats reads them too
+        internal static HashSet<BoatRefs> Boats => boats;
 
         internal static void ResetCaches()
         {
