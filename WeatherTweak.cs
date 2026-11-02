@@ -746,7 +746,7 @@ namespace BetterStorm
             return matches;
         }
 
-        private static List<int> FindFloatLoads(
+        internal static List<int> FindFloatLoads(
             List<CodeInstruction> code,
             float value)
         {
@@ -769,7 +769,7 @@ namespace BetterStorm
                 loaded == value;
         }
 
-        private static void ReplaceLoadsWithCall(
+        internal static void ReplaceLoadsWithCall(
             List<CodeInstruction> code,
             List<int> indexes,
             MethodInfo helper)
@@ -856,6 +856,46 @@ namespace BetterStorm
             IEnumerable<CodeInstruction> instructions)
         {
             return StormWindIlRewriter.RewriteVanilla(instructions);
+        }
+    }
+
+    // The game's storms recycled across the player at the Storm Relocation Distance setting in place of the game's fixed 44,000
+    // (the user, 2026-11-02: "i want the slider to affect vanilla storm too"): only the constant is swapped, the game's own
+    // movement and its jump to 0.75 x the distance on the other side are kept. Better Storm's storms skip this method
+    // (CustomStormMovementPatch) and read the same setting in ModStormController.CustomUpdate.
+    [HarmonyPatch(typeof(WanderingStorm), "Update")]
+    internal static class VanillaStormRelocationPatch
+    {
+        private static readonly MethodInfo DistanceHelper = AccessTools.Method(
+            typeof(VanillaStormRelocationPatch),
+            nameof(GetRelocationDistance));
+
+        [HarmonyTranspiler]
+        private static IEnumerable<CodeInstruction> Transpiler(
+            IEnumerable<CodeInstruction> instructions)
+        {
+            List<CodeInstruction> code = new List<CodeInstruction>(instructions);
+            List<int> loads = StormWindIlRewriter.FindFloatLoads(
+                code,
+                BetterStormPlugin.DefaultRelocationDistance);
+            if (loads.Count != 1)
+            {
+                BetterStormPlugin.Instance?.LogFeatureError(
+                    "Storm relocation IL pattern mismatch in WanderingStorm.Update: " +
+                    "44,000 loads=" + loads.Count + "; expected exactly one. " +
+                    "The game's storms keep its own relocation distance.");
+                return code;
+            }
+
+            StormWindIlRewriter.ReplaceLoadsWithCall(code, loads, DistanceHelper);
+            BetterStormPlugin.Instance?.LogFeatureInfo(
+                "Patched the game's storm relocation distance in WanderingStorm.Update.");
+            return code;
+        }
+
+        internal static float GetRelocationDistance()
+        {
+            return BetterStormPlugin.CurrentRelocationDistance;
         }
     }
 

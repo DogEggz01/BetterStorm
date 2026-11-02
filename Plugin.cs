@@ -46,6 +46,15 @@ namespace BetterStorm
         internal ConfigEntry<bool> DisableSeasonLimits { get; private set; }
         internal ConfigEntry<float> FallbackBonusCap { get; private set; }
         internal ConfigEntry<int> RelocationDistance { get; private set; }
+
+        // the game's own relocation distance (WanderingStorm.Update), used before the configuration is bound
+        internal const int DefaultRelocationDistance = 44000;
+
+        // The distance at which every storm, the game's and Better Storm's, is recycled across the player.
+        internal static float CurrentRelocationDistance =>
+            Instance != null && Instance.RelocationDistance != null
+                ? Instance.RelocationDistance.Value
+                : DefaultRelocationDistance;
         internal ConfigEntry<int> MistFollowHours { get; private set; }
         internal ConfigEntry<bool> ShowMistCloud { get; private set; }
         internal ConfigEntry<float> StormMusicVolume { get; private set; }
@@ -156,13 +165,15 @@ namespace BetterStorm
                 "Used when Chaotic Wind is not installed. Chaotic Wind's " +
                 "setting has priority when both mods are installed.", 10);
 
+            // every storm, the game's included, up to 100,000 (the user, 2026-11-02: "i want the slider to affect vanilla storm
+            // too, also raise the upper limit to 100km")
             RelocationDistance = Config.Bind(
                 "Storms", "Storm Relocation Distance",
-                44000,
+                DefaultRelocationDistance,
                 new ConfigDescription(
-                    "Distance at which a custom storm is recycled across the player. " +
+                    "Distance at which a storm, the game's own and Better Storm's, is recycled across the player. " +
                     "Increasing this reduces the chance of encountering a storm.",
-                    new AcceptableValueRange<int>(18000, 90000),
+                    new AcceptableValueRange<int>(18000, 100000),
                     new ConfigurationManagerAttributes
                     {
                         ShowRangeAsPercent = false,

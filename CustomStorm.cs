@@ -666,10 +666,7 @@ namespace BetterStorm
             horizontal.y = 0f;
             float distance = horizontal.magnitude;
 
-            BetterStormPlugin plugin = BetterStormPlugin.Instance;
-            float relocationDistance = plugin != null
-                ? plugin.RelocationDistance.Value
-                : 44000f;
+            float relocationDistance = BetterStormPlugin.CurrentRelocationDistance;
             bool activeBeforeRelocation = ShouldBeActive();
             if (HasLatitudeLimit)
             {
@@ -709,10 +706,7 @@ namespace BetterStorm
                 return;
             }
 
-            BetterStormPlugin plugin = BetterStormPlugin.Instance;
-            float relocationDistance = plugin != null
-                ? plugin.RelocationDistance.Value
-                : 44000f;
+            float relocationDistance = BetterStormPlugin.CurrentRelocationDistance;
             if (ShouldParkForLatitude(relocationDistance))
             {
                 ParkAtLatitudeLimit();
@@ -742,10 +736,7 @@ namespace BetterStorm
             if (HasLatitudeLimit)
             {
                 target = ClampToLatitudeLimit(target);
-                BetterStormPlugin plugin = BetterStormPlugin.Instance;
-                float relocationDistance = plugin != null
-                    ? plugin.RelocationDistance.Value
-                    : 44000f;
+                float relocationDistance = BetterStormPlugin.CurrentRelocationDistance;
                 latitudeParked = player != null &&
                     ShouldParkForLatitude(relocationDistance);
             }
