@@ -41,6 +41,7 @@
 - Once go close to land, fog will disspiate and instrument will return normal soon
   - It will also stop following you and start the 168 hour cooldown if you go close to land
 - Show up in all area and all season
+- Magnetic mist's cloud can be disable in configurator, so there will only be aurora.
 ## Regional special storm
 - All regional special storm only spawn once. So it will be more rare.
 - There is a toggle option to let all storm active regardless of season.
