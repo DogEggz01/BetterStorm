@@ -68,7 +68,7 @@
 ## Storm music player
 - You will start hear the music when you enter it's effect radius, the closer you're to the core, the louder the music
 - Music player is default off, you need to enable it in configurator
-- put your .ogg file in plugins\BetterStorm\Music, and name the file name as following:
+- put your .ogg Vorbis file in plugins\BetterStorm\Music, and name the file name as following:
   - DryThunderstorm
   - GentleSnow
   - HighPressure
