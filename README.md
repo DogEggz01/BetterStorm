@@ -2,6 +2,7 @@
 *Disclaimer: This mod is made with ChatGPT 5.6 Sol*
 ### This mod have increased particles generation, it will affect performance on low spec computer
 ## Universal storm changes
+- Storm wandering range increase due to additional storm added by the mod.
 - Vanilla Storm got a much bigger storm cloud, actual radius stay the same.
 - Storm wind bonus now start increasing at storm effect radius, and reach maximum at (storm core radius/2).
 - Lighting now happen in the maximum storm wind area, so you can know approximately where it is.
