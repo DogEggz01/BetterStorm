@@ -26,7 +26,7 @@ namespace BetterStorm
     {
         public const string PluginGuid = "DogEggz.BetterStorm";
         public const string PluginName = "Better Storm";
-        public const string PluginVersion = "1.2.2";
+        public const string PluginVersion = "1.2.4";
 
         public const string ChaoticWindGuid = "com.pete.sailwind.windconfigurator";
         public const string ClimateGuid = "com.raddude.climate";
@@ -45,16 +45,41 @@ namespace BetterStorm
 
         internal ConfigEntry<bool> DisableSeasonLimits { get; private set; }
         internal ConfigEntry<float> FallbackBonusCap { get; private set; }
-        internal ConfigEntry<int> RelocationDistance { get; private set; }
+        internal ConfigEntry<float> ResetRange { get; private set; }
+        // each storm kind's chance (%) to be awake at a roll (StormChance; STORM_CHANCE_DRAFT.md)
+        internal readonly Dictionary<StormKind, ConfigEntry<int>> ChanceEntries = new Dictionary<StormKind, ConfigEntry<int>>();
 
-        // the game's own relocation distance (WanderingStorm.Update), used before the configuration is bound
-        internal const int DefaultRelocationDistance = 44000;
+        // the game's own reset range (WanderingStorm.Update: past 44,000 a storm jumps across the player), by which its IL is matched
+        internal const float VanillaResetRange = 44000f;
+        // the setting's default (the user, 2026-11-03: "change the default range to 54000 instead"), also used before the
+        // configuration is bound
+        internal const float DefaultResetRange = 54000f;
 
-        // The distance at which every storm, the game's and Better Storm's, is recycled across the player.
-        internal static float CurrentRelocationDistance =>
-            Instance != null && Instance.RelocationDistance != null
-                ? Instance.RelocationDistance.Value
-                : DefaultRelocationDistance;
+        // The distance past which every storm, the game's and Better Storm's, is reset across the player (the Hurricane's own bonus
+        // removed, the user, 2026-11-16: "remove the hurricane's special wandering range, so all storm is the same and control by
+        // same slider").
+        internal static float CurrentResetRange =>
+            Instance != null && Instance.ResetRange != null
+                ? Instance.ResetRange.Value
+                : DefaultResetRange;
+
+        // a storm kind's chance (%) to be awake at a roll: its slider, or the slider's default before the configuration is bound
+        internal static int ChanceOf(StormKind kind)
+        {
+            return Instance != null && Instance.ChanceEntries.TryGetValue(kind, out ConfigEntry<int> entry)
+                ? entry.Value
+                : StormChance.DefaultChance(kind);
+        }
+
+        // How far from the player a storm reset past `range` lands, across the player: at the range itself (the user, 2026-11-16:
+        // "make the storm actually jump to where the reset range set, so default it's 54 km"; from 2026-11-03 it landed 9,000 short,
+        // the game's own at 0.75 x the distance). The relative motion that took it past the range brings it back in after the mirror
+        // jump; only a push away from the player (the sun totem, +60 x totemMult 4 = 240 a second) takes it straight back out, and then
+        // it jumps once a second, out of sight, rolling its chance each time (STORM_CHANCE_DRAFT.md).
+        internal static float ResetLandDistance(float range)
+        {
+            return Mathf.Max(0f, range);
+        }
         internal ConfigEntry<int> MistFollowHours { get; private set; }
         internal ConfigEntry<bool> ShowMistCloud { get; private set; }
         internal ConfigEntry<float> StormMusicVolume { get; private set; }
@@ -96,6 +121,7 @@ namespace BetterStorm
 
         private void Update()
         {
+            StormChance.Tick();
             WindOverrideState.Tick();
             DoldrumsWind.Tick();
             GentleSnowWind.Tick();
@@ -165,20 +191,36 @@ namespace BetterStorm
                 "Used when Chaotic Wind is not installed. Chaotic Wind's " +
                 "setting has priority when both mods are installed.", 10);
 
-            // every storm, the game's included, up to 100,000 (the user, 2026-11-02: "i want the slider to affect vanilla storm
-            // too, also raise the upper limit to 100km")
-            RelocationDistance = Config.Bind(
-                "Storms", "Storm Relocation Distance",
-                DefaultRelocationDistance,
-                new ConfigDescription(
-                    "Distance at which a storm, the game's own and Better Storm's, is recycled across the player. " +
-                    "Increasing this reduces the chance of encountering a storm.",
-                    new AcceptableValueRange<int>(18000, 100000),
-                    new ConfigurationManagerAttributes
-                    {
-                        ShowRangeAsPercent = false,
-                        Order = 10
-                    }));
+            // every storm, the game's included (the user, 2026-11-02: "i want the slider to affect vanilla storm too"; 2026-11-03:
+            // "Change the slider name to "Storm reset range". Range 44000 - 135000. step 100 Tool tip mention 44000 is vanilla game
+            // default. 54000 is this mod's default."); a new key, so a value saved under the old one (often its old default, 44,000)
+            // is not carried over
+            ResetRange = BindSteppedSlider(
+                "Storms", "Storm reset range",
+                DefaultResetRange, 44000f, 135000f, 100f,
+                "Distance at which a storm, the game's own and Better Storm's, is reset across the player: it jumps to the " +
+                "other side, landing at this distance. 44,000 is the vanilla game's default; 54,000 is this " +
+                "mod's default. Increasing this reduces the chance of encountering a storm.",
+                10);
+
+            // one slider per storm kind, the game's storms and the three Squalls each sharing one (the user, 2026-11-16: "every storm
+            // include vanilla storm receive a slider to determine it's activate chance ... Slider step 1%. 1-100%"; defaults: the
+            // Magnetic Mist and the Hurricane 50, the rest 100)
+            for (int i = 0; i < StormChance.Kinds.Length; i++)
+            {
+                StormKind kind = StormChance.Kinds[i];
+                string name = StormChance.DisplayName(kind);
+                ChanceEntries[kind] = Config.Bind(
+                    "Storm Chance", name + " chance (%)",
+                    StormChance.DefaultChance(kind),
+                    new ConfigDescription(
+                        "Chance (%) that " + StormChance.Covers(kind) + " is real each time it comes around. It rolls when " +
+                        "it first appears and each time it is reset across the player (see Storm reset range); on a failed roll " +
+                        "it stays hidden and harmless until its next reset. The result is saved with the game. A change applies " +
+                        "from the storm's next roll.",
+                        new AcceptableValueRange<int>(StormChance.MinimumChance, StormChance.MaximumChance),
+                        new ConfigurationManagerAttributes { Order = StormChance.Kinds.Length - i }));
+            }
 
             MistFollowHours = Config.Bind(
                 "Magnetic Mist", "Follow Time (in-game hours)",
@@ -1086,6 +1128,7 @@ namespace BetterStorm
             Vector3 target = summon ? player.position : player.position + away * outerEdge;
             target.y = storm.transform.position.y;
             storm.transform.position = target;
+            StormChance.WakeGameStorm(storm);   // a debug move always works, whatever the storm's last roll
             storm.active = true;
             ParticleSystem bottom = StormAccess.BottomParticles(storm);
             if (bottom != null)

@@ -859,43 +859,430 @@ namespace BetterStorm
         }
     }
 
-    // The game's storms recycled across the player at the Storm Relocation Distance setting in place of the game's fixed 44,000
-    // (the user, 2026-11-02: "i want the slider to affect vanilla storm too"): only the constant is swapped, the game's own
-    // movement and its jump to 0.75 x the distance on the other side are kept. Better Storm's storms skip this method
+    // The game's storms reset across the player at the Storm reset range setting in place of the game's fixed 44,000 (the user,
+    // 2026-11-02: "i want the slider to affect vanilla storm too"), landing at it on the far side (ResetLandDistance; 9,000 short of
+    // it from 2026-11-03 to 2026-11-16) in place of the game's 0.75 x the
+    // distance (2026-11-03: "New jump land at (slider setting -9000) please"): the 44,000 swapped for the setting and the jump's
+    // 1.75 for a factor read from the storm's offset, the game's own movement kept. Better Storm's storms skip this method
     // (CustomStormMovementPatch) and read the same setting in ModStormController.CustomUpdate.
     [HarmonyPatch(typeof(WanderingStorm), "Update")]
     internal static class VanillaStormRelocationPatch
     {
+        // the game's jump: Translate(a * 1.75f), `a` the storm's level offset to the player
+        private const float VanillaJumpFactor = 1.75f;
         private static readonly MethodInfo DistanceHelper = AccessTools.Method(
             typeof(VanillaStormRelocationPatch),
             nameof(GetRelocationDistance));
+        private static readonly MethodInfo JumpHelper = AccessTools.Method(
+            typeof(VanillaStormRelocationPatch),
+            nameof(GetJumpFactor));
+        private static readonly MethodInfo VectorTimesFloat = AccessTools.Method(
+            typeof(Vector3),
+            "op_Multiply",
+            new[] { typeof(Vector3), typeof(float) });
+        private static readonly MethodInfo RegionCheck = AccessTools.Method(
+            typeof(WanderingStorm),
+            "UpdateActiveInRegion");
+        private static readonly MethodInfo ChanceHelper = AccessTools.Method(
+            typeof(StormChance),
+            nameof(StormChance.ApplyToGameStorm));
 
         [HarmonyTranspiler]
         private static IEnumerable<CodeInstruction> Transpiler(
             IEnumerable<CodeInstruction> instructions)
         {
             List<CodeInstruction> code = new List<CodeInstruction>(instructions);
+            InsertChanceCheck(code);
             List<int> loads = StormWindIlRewriter.FindFloatLoads(
                 code,
-                BetterStormPlugin.DefaultRelocationDistance);
+                BetterStormPlugin.VanillaResetRange);
             if (loads.Count != 1)
             {
                 BetterStormPlugin.Instance?.LogFeatureError(
-                    "Storm relocation IL pattern mismatch in WanderingStorm.Update: " +
+                    "Storm reset IL pattern mismatch in WanderingStorm.Update: " +
                     "44,000 loads=" + loads.Count + "; expected exactly one. " +
-                    "The game's storms keep its own relocation distance.");
+                    "The game's storms keep its own reset range and landing.");
                 return code;
             }
 
             StormWindIlRewriter.ReplaceLoadsWithCall(code, loads, DistanceHelper);
+
+            // the jump: `ldloc a; ldc.r4 1.75; call op_Multiply` becomes `ldloc a; dup; ldarg.0; call GetJumpFactor; call op_Multiply`,
+            // the storm passed for its chance roll at the jump (StormChance)
+            List<int> jumps = StormWindIlRewriter.FindFloatLoads(code, VanillaJumpFactor);
+            int at = jumps.Count == 1 ? jumps[0] : -1;
+            if (at < 1 || at + 1 >= code.Count || !code[at - 1].IsLdloc() || !code[at + 1].Calls(VectorTimesFloat))
+            {
+                BetterStormPlugin.Instance?.LogFeatureError(
+                    "Storm reset IL pattern mismatch in WanderingStorm.Update: " +
+                    "1.75 loads=" + jumps.Count + "; expected exactly one, after the offset and before its multiply. " +
+                    "The game's storms land at its own 0.75 x the distance.");
+                BetterStormPlugin.Instance?.LogFeatureInfo(
+                    "Patched the game's storm reset range in WanderingStorm.Update.");
+                return code;
+            }
+
+            CodeInstruction original = code[at];
+            CodeInstruction dup = new CodeInstruction(OpCodes.Dup);
+            dup.labels.AddRange(original.labels);
+            dup.blocks.AddRange(original.blocks);
+            code[at] = new CodeInstruction(OpCodes.Call, JumpHelper);
+            code.Insert(at, new CodeInstruction(OpCodes.Ldarg_0));
+            code.Insert(at, dup);
             BetterStormPlugin.Instance?.LogFeatureInfo(
-                "Patched the game's storm relocation distance in WanderingStorm.Update.");
+                "Patched the game's storm reset range and landing in WanderingStorm.Update.");
             return code;
+        }
+
+        // After the game's region check (WanderingStorm.UpdateActiveInRegion, the only place the game sets a storm's `active`, asked
+        // once a second while it is over 12,000 away): `ldarg.0; call StormChance.ApplyToGameStorm`, so a dormant storm stays off. In
+        // the IL rather than a patch on UpdateActiveInRegion, a small method the JIT may inline into Update.
+        private static void InsertChanceCheck(List<CodeInstruction> code)
+        {
+            int found = 0;
+            for (int i = code.Count - 1; i >= 0; i--)
+            {
+                if (RegionCheck != null && code[i].Calls(RegionCheck))
+                {
+                    code.Insert(i + 1, new CodeInstruction(OpCodes.Call, ChanceHelper));
+                    code.Insert(i + 1, new CodeInstruction(OpCodes.Ldarg_0));
+                    found++;
+                }
+            }
+
+            if (found != 1)
+            {
+                BetterStormPlugin.Instance?.LogFeatureError(
+                    "Storm chance IL pattern mismatch in WanderingStorm.Update: " +
+                    "UpdateActiveInRegion calls=" + found + "; expected exactly one. " +
+                    (found == 0 ? "The game's storms ignore the Vanilla Storm chance." : "Each call checked."));
+            }
         }
 
         internal static float GetRelocationDistance()
         {
-            return BetterStormPlugin.CurrentRelocationDistance;
+            return BetterStormPlugin.CurrentResetRange;
+        }
+
+        // the factor the game's jump multiplies the offset to the player by: past the player to ResetLandDistance on the far side;
+        // called only at the jump, so the storm rolls its chance again here (StormChance)
+        internal static float GetJumpFactor(Vector3 offset, WanderingStorm storm)
+        {
+            StormChance.RerollGameStorm(storm);
+            float distance = offset.magnitude;
+            return distance > 1f
+                ? 1f + BetterStormPlugin.ResetLandDistance(BetterStormPlugin.CurrentResetRange) / distance
+                : VanillaJumpFactor;
+        }
+    }
+
+    // Each storm's chance to be real (STORM_CHANCE_DRAFT.md; the user, 2026-11-16: "every storm include vanilla storm receive a slider
+    // to determine it's activate chance", "State need to be save"). A storm rolls when it first appears (no state saved, rolled once
+    // play begins) and each time it is reset across the player; awake it is as before, dormant it is not active (no cloud, rain, wind,
+    // lightning, music, never the storm in control) until its next reset rolls again. It still drifts and is still reset: the reset
+    // asks ShouldBeActive, which leaves the roll out, or a dormant storm would never roll again. Better Storm's storms ask it in
+    // ModStormController.UpdateActive and roll in CustomUpdate; the game's storms through VanillaStormRelocationPatch.
+    internal static class StormChance
+    {
+        internal const int MinimumChance = 1;
+        internal const int MaximumChance = 100;
+        private const string GameStormKeyPrefix = "DogEggz.BetterStorm.game-storm-";
+        private const string AwakeKeySuffix = "-awake.v1";
+        private const string PositionKeySuffix = "-position.v2";
+
+        // one slider each, in this order; the game's storms share one, and so do the three Squalls (the user: "For storm that have
+        // multiple copies, one setting apply for all, so squalls and vanilla storm still only have 1 slider")
+        internal static readonly StormKind[] Kinds =
+        {
+            StormKind.Vanilla,
+            StormKind.Squall,
+            StormKind.Hurricane,
+            StormKind.DryThunderstorm,
+            StormKind.Sandstorm,
+            StormKind.GentleSnow,
+            StormKind.Doldrums,
+            StormKind.MagneticMist
+        };
+
+        private enum State : byte
+        {
+            Unknown,   // not rolled yet: a new game, or no state saved
+            Awake,
+            Dormant
+        }
+
+        private static readonly State[] custom = new State[Enum.GetValues(typeof(CustomStormId)).Length];
+        private static readonly Dictionary<int, State> game = new Dictionary<int, State>();   // by the place in WeatherStorms.storms
+        private static bool settled;   // every storm rolled or read since play began
+
+        // the user's defaults (2026-11-16, changed from "Magnetic storm, Hurricane: 50%" the same day): "Magnetic storm: 30%",
+        // "Hurricane: 30%", "High Pressure: 70%"; "All others: 100%"
+        internal static int DefaultChance(StormKind kind)
+        {
+            switch (kind)
+            {
+                case StormKind.MagneticMist:
+                case StormKind.Hurricane:
+                    return 30;
+                case StormKind.Doldrums:
+                    return 70;
+                default:
+                    return 100;
+            }
+        }
+
+        internal static string DisplayName(StormKind kind)
+        {
+            switch (kind)
+            {
+                case StormKind.Vanilla: return "Vanilla Storm";
+                case StormKind.Squall: return "Squall";
+                case StormKind.Hurricane: return "Hurricane";
+                case StormKind.DryThunderstorm: return "Dry Thunderstorm";
+                case StormKind.Sandstorm: return "Sandstorm";
+                case StormKind.GentleSnow: return "Gentle Snow";
+                case StormKind.Doldrums: return "High Pressure";
+                case StormKind.MagneticMist: return "Magnetic Mist";
+                default: return kind.ToString();
+            }
+        }
+
+        // what a kind's slider covers, for its tooltip
+        internal static string Covers(StormKind kind)
+        {
+            switch (kind)
+            {
+                case StormKind.Vanilla: return "each of the game's own storms";
+                case StormKind.Squall: return "each of the three Squalls";
+                default: return "the " + DisplayName(kind);
+            }
+        }
+
+        // passes `chance` times in 100 (100 always, 1 once); its own method so the QA can make every roll pass
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        internal static bool PassRoll(int chance)
+        {
+            return UnityEngine.Random.Range(0, 100) < chance;
+        }
+
+        private static State Roll(StormKind kind, string name)
+        {
+            int chance = Mathf.Clamp(BetterStormPlugin.ChanceOf(kind), MinimumChance, MaximumChance);
+            bool awake = PassRoll(chance);
+            BetterStormPlugin.Instance?.LogFeatureInfo(
+                "Storm chance: " + name + " rolled " + (awake ? "awake" : "dormant") + " (" + chance + "%).");
+            return awake ? State.Awake : State.Dormant;
+        }
+
+        // Better Storm's storm: awake? Not rolled yet: rolled now while playing, else counted awake (the start menu).
+        internal static bool IsAwake(StormDefinition definition)
+        {
+            int i = (int)definition.Id;
+            if (custom[i] == State.Unknown)
+            {
+                if (!GameState.playing)
+                {
+                    return true;
+                }
+
+                custom[i] = Roll(definition.Kind, definition.Name);
+            }
+
+            return custom[i] == State.Awake;
+        }
+
+        internal static void Reroll(StormDefinition definition)
+        {
+            custom[(int)definition.Id] = Roll(definition.Kind, definition.Name);
+        }
+
+        internal static void Wake(StormDefinition definition)
+        {
+            custom[(int)definition.Id] = State.Awake;
+        }
+
+        // the game's storm at `index` in WeatherStorms.storms: awake? As IsAwake.
+        internal static bool IsGameStormAwake(int index)
+        {
+            if (!game.TryGetValue(index, out State state) || state == State.Unknown)
+            {
+                if (!GameState.playing)
+                {
+                    return true;
+                }
+
+                state = Roll(StormKind.Vanilla, "game storm " + index);
+                game[index] = state;
+            }
+
+            return state == State.Awake;
+        }
+
+        // after the game's region check (VanillaStormRelocationPatch): a dormant game storm kept off
+        internal static void ApplyToGameStorm(WanderingStorm storm)
+        {
+            if (storm == null || !storm.active)
+            {
+                return;
+            }
+
+            int index = ModStormFactory.GameStormIndex(storm);
+            if (index >= 0 && !IsGameStormAwake(index))
+            {
+                storm.active = false;
+            }
+        }
+
+        internal static void RerollGameStorm(WanderingStorm storm)
+        {
+            int index = ModStormFactory.GameStormIndex(storm);
+            if (index >= 0)
+            {
+                game[index] = Roll(StormKind.Vanilla, "game storm " + index);
+            }
+        }
+
+        internal static void WakeGameStorm(WanderingStorm storm)
+        {
+            int index = ModStormFactory.GameStormIndex(storm);
+            if (index >= 0)
+            {
+                game[index] = State.Awake;
+            }
+        }
+
+        // Once play begins (a new game, or a load: the load reads the saved states before GameState.playing): every storm not yet
+        // rolled rolls, and a dormant one is switched off at once, before anything is seen (the game asks its storms again only
+        // while they are over 12,000 away, so one loaded near the player would keep its old `active`).
+        internal static void Tick()
+        {
+            if (settled || !GameState.playing)
+            {
+                return;
+            }
+
+            settled = true;
+            for (int i = 0; i < StormCatalog.Custom.Length; i++)
+            {
+                StormDefinition definition = StormCatalog.Custom[i];
+                // a mist following the player is awake (a save from before the chance with a follow running): it rolls only at a
+                // reset, which never comes while it follows, so a dormant roll here would leave it following unseen
+                if (definition.Kind == StormKind.MagneticMist && MagneticMistFollow.IsFollowing &&
+                    custom[(int)definition.Id] == State.Unknown)
+                {
+                    Wake(definition);
+                }
+
+                if (!IsAwake(definition))
+                {
+                    ModStormController controller = ModStormFactory.Find(definition.Id);
+                    if (controller != null && controller.Storm != null)
+                    {
+                        controller.Storm.active = false;
+                    }
+                }
+            }
+
+            WanderingStorm[] storms = ModStormFactory.GameStorms;
+            if (storms == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < storms.Length; i++)
+            {
+                if (storms[i] != null && !IsGameStormAwake(i))
+                {
+                    storms[i].active = false;
+                }
+            }
+        }
+
+        // SaveLoadManager.LoadGame (CustomStormBeginLoadPatch): every state forgotten until the load reads them
+        internal static void BeginLoad()
+        {
+            Array.Clear(custom, 0, custom.Length);
+            game.Clear();
+            settled = false;
+        }
+
+        // SaveLoadManager.LoadModData: the saved states; a storm with none rolls once play begins (Tick)
+        internal static void Load()
+        {
+            for (int i = 0; i < StormCatalog.Custom.Length; i++)
+            {
+                StormDefinition definition = StormCatalog.Custom[i];
+                custom[(int)definition.Id] = Read(AwakeKey(definition));
+            }
+
+            game.Clear();
+            WanderingStorm[] storms = ModStormFactory.GameStorms;
+            for (int i = 0; storms != null && i < storms.Length; i++)
+            {
+                game[i] = Read(GameStormKeyPrefix + i + AwakeKeySuffix);
+            }
+        }
+
+        // SaveLoadManager.SaveModData: "1" awake, "0" dormant, one key per storm
+        internal static void Save()
+        {
+            if (GameState.modData == null)
+            {
+                GameState.modData = new Dictionary<string, string>();
+            }
+
+            for (int i = 0; i < StormCatalog.Custom.Length; i++)
+            {
+                StormDefinition definition = StormCatalog.Custom[i];
+                Write(AwakeKey(definition), custom[(int)definition.Id]);
+            }
+
+            WanderingStorm[] storms = ModStormFactory.GameStorms;
+            for (int i = 0; storms != null && i < storms.Length; i++)
+            {
+                Write(GameStormKeyPrefix + i + AwakeKeySuffix, game.TryGetValue(i, out State state) ? state : State.Unknown);
+            }
+        }
+
+        // a storm's key: its position key with its ending swapped (DogEggz.BetterStorm.hurricane-awake.v1)
+        internal static string AwakeKey(StormDefinition definition)
+        {
+            string key = definition.SaveKey;
+            return key.EndsWith(PositionKeySuffix, StringComparison.Ordinal)
+                ? key.Substring(0, key.Length - PositionKeySuffix.Length) + AwakeKeySuffix
+                : key + AwakeKeySuffix;
+        }
+
+        private static void Write(string key, State state)
+        {
+            if (state == State.Unknown)
+            {
+                GameState.modData.Remove(key);
+                return;
+            }
+
+            GameState.modData[key] = state == State.Awake ? "1" : "0";
+        }
+
+        private static State Read(string key)
+        {
+            if (GameState.modData == null || !GameState.modData.TryGetValue(key, out string value))
+            {
+                return State.Unknown;
+            }
+
+            if (value == "1")
+            {
+                return State.Awake;
+            }
+
+            if (value == "0")
+            {
+                return State.Dormant;
+            }
+
+            BetterStormPlugin.Instance?.LogFeatureWarning("Ignoring invalid storm chance save data in key " + key + ".");
+            return State.Unknown;
         }
     }
 

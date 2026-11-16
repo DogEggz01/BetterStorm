@@ -118,7 +118,7 @@ namespace BetterStorm
                 InitialOffset = new Vector3(0f, 0f, -24000f),
                 Priority = 2,
                 Radius = 8000f,             // with its eye of 2,400 (StormEyeShape; the user: "make it 8000 radius")
-                ParticleDistance = 20000f,  // its storm cloud shows out to its outer edge (Emerald: 20,000)
+                ParticleDistance = 20000f,  // its cloud emitted within this until its eye is built, then within its sight limit
                 MoveSpeed = 10f,
                 UsesFixedWeatherRange = false,
                 WindCoefficient = 34f,
@@ -498,7 +498,9 @@ namespace BetterStorm
         private float oneSecondTimer;
         private bool latitudeParked;
         private ParticleSystem mistCloud;   // the Magnetic Mist's outer cloud ring
+        private bool mistCloudShown;        // the mist's cloud shown at the last once-a-second check (ShowsCloud)
         private bool allowedHere;           // the place's say (AllowedHere) as last asked (UpdateActive)
+        private StormEye eye;               // the Hurricane's eye and storm cloud (StormEye.Build)
         // the game asks again whether its storms may be active here only while they are over this far away (WanderingStorm.Update)
         private const float RegionCheckDistance = 12000f;
 
@@ -553,10 +555,24 @@ namespace BetterStorm
 
             if (definition.Kind == StormKind.Hurricane)
             {
-                StormEye.Build(Storm, StormEyeShape.Hurricane);
+                eye = StormEye.Build(Storm, StormEyeShape.Hurricane);
             }
 
             oneSecondTimer = 0f;
+        }
+
+        // the distance past which it is reset across the player: the setting, the same for every storm (the Hurricane's bonus
+        // removed, the user, 2026-11-16: "remove the hurricane's special wandering range, so all storm is the same and control by
+        // same slider")
+        private float ResetRange
+        {
+            get { return BetterStormPlugin.CurrentResetRange; }
+        }
+
+        // the distance within which its cloud is emitted: the Hurricane's its sight limit, which follows its deck (StormEye.SightLimit)
+        private float CloudDistance
+        {
+            get { return eye != null ? eye.SightLimit : Definition.ParticleDistance; }
         }
 
         internal bool ShouldBeActive()
@@ -599,7 +615,8 @@ namespace BetterStorm
         // season where it isn't allowed keeps it until it is that far off (the user, 2026-11-02: "copy games"; before, it switched off
         // at once). Also asked while the game has just started or loaded (GameState.justStarted, until 2 s after the player presses F),
         // or a storm loaded near the player would keep the start menu's answer, its camera in another region. Switched off, and the
-        // Magnetic Mist near land, at once as before.
+        // Magnetic Mist near land, at once as before. A storm its chance left dormant is off too (StormChance), but ShouldBeActive,
+        // which the reset asks, leaves the roll out: a dormant storm still resets, and rolls again.
         private bool UpdateActive(float distance)
         {
             if (distance > RegionCheckDistance || GameState.justStarted || GameState.currentlyLoading)
@@ -607,7 +624,7 @@ namespace BetterStorm
                 allowedHere = AllowedHere();
             }
 
-            return IsActive(allowedHere, false);
+            return IsActive(allowedHere, false) && StormChance.IsAwake(Definition);
         }
 
         internal void CustomUpdate()
@@ -666,7 +683,7 @@ namespace BetterStorm
             horizontal.y = 0f;
             float distance = horizontal.magnitude;
 
-            float relocationDistance = BetterStormPlugin.CurrentRelocationDistance;
+            float relocationDistance = ResetRange;
             bool activeBeforeRelocation = ShouldBeActive();
             if (HasLatitudeLimit)
             {
@@ -679,7 +696,11 @@ namespace BetterStorm
                 !(Definition.Kind == StormKind.MagneticMist &&
                   MagneticMistFollow.IsFollowing))
             {
-                transform.Translate(-horizontal * 1.75f, Space.World);
+                // across the player, to its reset range on the other side (BetterStormPlugin.ResetLandDistance)
+                transform.Translate(
+                    -horizontal - horizontal.normalized * BetterStormPlugin.ResetLandDistance(relocationDistance),
+                    Space.World);
+                StormChance.Reroll(Definition);   // each reset rolls its chance again
             }
 
             Storm.active = UpdateActive(distance);
@@ -695,8 +716,17 @@ namespace BetterStorm
             horizontal.y = 0f;
             distance = horizontal.magnitude;
 
+            bool showsCloud = ShowsCloud;
+            if (Definition.Kind == StormKind.MagneticMist && showsCloud && !mistCloudShown)
+            {
+                // back on (the player 9,250 or more from land again, or the mist awake again): the bank filled at once, as when
+                // "Show Mist Cloud" is switched on, while MistAurora fades it in
+                ApplyMistCloud();
+            }
+
+            mistCloudShown = showsCloud;
             SetParticleEmission(
-                ShowsCloud && distance <= Definition.ParticleDistance);
+                showsCloud && distance <= CloudDistance);
         }
 
         internal void EnsureValidInitialPlacement()
@@ -706,7 +736,7 @@ namespace BetterStorm
                 return;
             }
 
-            float relocationDistance = BetterStormPlugin.CurrentRelocationDistance;
+            float relocationDistance = ResetRange;
             if (ShouldParkForLatitude(relocationDistance))
             {
                 ParkAtLatitudeLimit();
@@ -736,7 +766,7 @@ namespace BetterStorm
             if (HasLatitudeLimit)
             {
                 target = ClampToLatitudeLimit(target);
-                float relocationDistance = BetterStormPlugin.CurrentRelocationDistance;
+                float relocationDistance = ResetRange;
                 latitudeParked = player != null &&
                     ShouldParkForLatitude(relocationDistance);
             }
@@ -785,6 +815,7 @@ namespace BetterStorm
         internal void PrepareDebugMove(bool resetLightningCooldown)
         {
             gameObject.SetActive(true);
+            StormChance.Wake(Definition);   // a debug move always works, whatever the storm's last roll
             Storm.active = UpdateActive(float.PositiveInfinity);   // the place's say asked afresh
             oneSecondTimer = 0f;
 
@@ -804,7 +835,7 @@ namespace BetterStorm
                 horizontal.y = 0f;
                 SetParticleEmission(
                     ShowsCloud &&
-                    horizontal.magnitude <= Definition.ParticleDistance);
+                    horizontal.magnitude <= CloudDistance);
             }
         }
 
@@ -882,11 +913,17 @@ namespace BetterStorm
             }
         }
 
-        // the mist's cloud shows whenever it is enabled, like its aurora, also while it is off near land, unless "Show Mist Cloud" is
-        // off (§4.2)
+        // the mist's cloud shows while "Show Mist Cloud" is on (§4.2) and MistAurora.Visible: awake (StormChance) and the player 9,000 or
+        // more from land, the rule that switches the mist itself off (the user, 2026-11-16, option A of "is it possible for when
+        // magnetic storm is within 9km of land, it don't shows no visual effect?"; before, it showed also while off near land)
         private bool ShowsCloud
         {
-            get { return Definition.Kind == StormKind.MagneticMist ? MistCloudOn : Storm.active; }
+            get
+            {
+                return Definition.Kind == StormKind.MagneticMist
+                    ? MistCloudOn && MistAurora.Visible
+                    : Storm.active;
+            }
         }
 
         // the setting "Magnetic Mist" / "Show Mist Cloud" (LOOK_UPDATE_DRAFT.md §4.2; the user, 2026-10-31: "Make magnetic storm cloud
@@ -916,7 +953,7 @@ namespace BetterStorm
             {
                 Vector3 horizontal = transform.position - player.position;
                 horizontal.y = 0f;
-                on = ShowsCloud && horizontal.magnitude <= Definition.ParticleDistance;
+                on = ShowsCloud && horizontal.magnitude <= CloudDistance;
             }
 
             SetParticleEmission(on);
@@ -1004,6 +1041,7 @@ namespace BetterStorm
 
                 latitudeParked = false;
                 RelocateAcrossPlayer(relocationDistance);
+                StormChance.Reroll(Definition);   // each reset rolls its chance again
                 return;
             }
 
@@ -1023,6 +1061,7 @@ namespace BetterStorm
             else
             {
                 RelocateAcrossPlayer(relocationDistance);
+                StormChance.Reroll(Definition);   // each reset rolls its chance again
             }
         }
 
@@ -1043,7 +1082,7 @@ namespace BetterStorm
                 ? -horizontal.normalized
                 : Vector3.forward;
             Vector3 target = player.position +
-                direction * relocationDistance * 0.75f;
+                direction * BetterStormPlugin.ResetLandDistance(relocationDistance);
             target.y = transform.position.y;
             target = ClampToLatitudeLimit(target);
 
@@ -1178,6 +1217,18 @@ namespace BetterStorm
         private static bool initialized;
 
         internal static ModStormController Sandstorm { get; private set; }
+
+        // the game's own storms, in WeatherStorms.storms' order (their places key their chance states, StormChance)
+        internal static WanderingStorm[] GameStorms
+        {
+            get { return originalStorms; }
+        }
+
+        // a game storm's place in GameStorms, or -1 (one of Better Storm's, or none initialized)
+        internal static int GameStormIndex(WanderingStorm storm)
+        {
+            return originalStorms != null && storm != null ? Array.IndexOf(originalStorms, storm) : -1;
+        }
 
         internal static void Initialize(WeatherStorms weatherStorms)
         {
@@ -1686,6 +1737,7 @@ namespace BetterStorm
             WindOverrideState.RestoreImmediately();
             RuntimeEffectLifecycle.ShutdownTransientEffects();
             StormPositionPersistence.BeginLoadAll();
+            StormChance.BeginLoad();
             DoldrumsWind.Reset();
             GentleSnowWind.Reset();
             MagneticMistFollow.BeginLoad();
@@ -1700,6 +1752,7 @@ namespace BetterStorm
         private static void Postfix()
         {
             StormPositionPersistence.SaveAll();
+            StormChance.Save();
             MagneticMistFollow.Save();
         }
     }
@@ -1711,6 +1764,7 @@ namespace BetterStorm
         private static void Postfix()
         {
             StormPositionPersistence.LoadAll();
+            StormChance.Load();
             MagneticMistFollow.Load();
         }
     }
@@ -4191,6 +4245,17 @@ namespace BetterStorm
     // clouds go under the dome (2998) and every curtain over it, in its night look at every hour, faded by the fog (CoreClear).
     internal sealed class MistAurora : MonoBehaviour
     {
+        // the mist's catalog entry, for its chance state (StormChance)
+        private static readonly StormDefinition MistDefinition = StormCatalog.Find(CustomStormId.MagneticMist);
+
+        // The mist's look (its aurora, fog bank and cloud) is shown only while it is awake (StormChance) and the player is 9,000 or more
+        // from land (MagneticMistOpenOcean, the rule that switches the mist itself off; on again at 9,250): the user, 2026-11-16, option
+        // A of "is it possible for when magnetic storm is within 9km of land, it don't shows no visual effect?". Off, it fades out over
+        // FadeSeconds (`shown`), on again it fades in.
+        internal static bool Visible
+        {
+            get { return StormChance.IsAwake(MistDefinition) && MagneticMistOpenOcean.Check(); }
+        }
         private const int Curtains = 12, Columns = 56, Rows = 5;
         // the aurora's light on the cloud (Skirt) under every SkirtStep-th column and the last: on every column it took a rebuild
         // from 521 to 632 us, 216 us a frame at 60 fps (-bsAurora, run 20261026-195501; the limit 200)
@@ -4959,7 +5024,7 @@ namespace BetterStorm
             Vector3 p = transform.parent.position;
             transform.position = new Vector3(p.x, 0f, p.z);
             transform.rotation = Quaternion.identity;
-            shown = Mathf.MoveTowards(shown, 1f, Time.deltaTime / FadeSeconds);
+            shown = Mathf.MoveTowards(shown, Visible ? 1f : 0f, Time.deltaTime / FadeSeconds);
             if (Time.timeScale > 0f)
             {
                 substormClock += Mathf.Min(Time.unscaledDeltaTime, 0.5f);   // real seconds, stopped by a pause
@@ -4972,7 +5037,8 @@ namespace BetterStorm
             // seen only within MagneticMistRules.CloudDistance of the centre, fading into the haze over its last StormEyeShape.SightFade;
             // past it neither drawn nor rebuilt (LOOK_UPDATE_DRAFT.md §4.1)
             sight = 1f - StormEyeShape.Haze(viewDistance, MagneticMistRules.CloudDistance);
-            bool inSight = viewDistance < MagneticMistRules.CloudDistance;
+            // also hidden once faded out (dormant, or the player near land: Visible)
+            bool inSight = viewDistance < MagneticMistRules.CloudDistance && shown > 0f;
             if (meshRenderer.enabled != inSight)
             {
                 meshRenderer.enabled = inSight;
@@ -5028,8 +5094,9 @@ namespace BetterStorm
 
             SetEmission(innerCloud, emission);
             SetEmission(outerCloud, emission);
-            cloudFade.Set(StormEyeShape.FadeShare(haze));
-            bool drawn = ModStormController.MistCloudOn && viewDistance < MagneticMistRules.CloudDistance;
+            // the puffs also faded with the aurora (`shown`: dormant, or the player near land), then not drawn
+            cloudFade.Set(StormEyeShape.FadeShare(haze) * shown);
+            bool drawn = ModStormController.MistCloudOn && viewDistance < MagneticMistRules.CloudDistance && shown > 0f;
             for (int i = 0; i < cloudRenderers.Length; i++)
             {
                 if (cloudRenderers[i] != null && cloudRenderers[i].enabled != drawn)
@@ -5525,11 +5592,16 @@ namespace BetterStorm
 
         // the game's radius (3,000) + the largest range (12,000): their largest outer edge, out to which their thunder is heard
         internal const float GameStormOuterEdge = 15000f;
-        // their storm cloud seen within this of their centre (LOOK_UPDATE_DRAFT.md §4.1; the user, 2026-10-31: "make hurricane visible
-        // from 12km instead, start building", at once "sorry not hurricane, i mean vanilla storm"; to their outer edge, 15,000, before,
-        // the game's own 5,500), fading into the haze over its last SightFade
-        internal const float GameStormCloudDistance = 12000f;
-        // far clouds (a game storm's, the mist's and its aurora) fade into the haze over this last stretch before their sight limit
+        // a storm cloud seen out to its deck's edge (the game's full-cloud line, StormEye.ringOuter) + its margin, fading into the haze
+        // over the last SightFade (HURRICANE_SIGHT_DRAFT.md; the user, 2026-11-03: "make vanilla storm show it's cloud at cloud edge
+        // +4500, Hurricane +9000"; before, a game storm's within 12,000 of its centre, LOOK_UPDATE_DRAFT.md §4.1, the Hurricane's whole
+        // within 20,000)
+        internal const float GameStormSightMargin = 4500f;
+        internal const float HurricaneSightMargin = 9000f;
+        // a storm cloud's fade into the haze, over this last stretch before its sight limit (the user, 2026-11-03: "make the storm and
+        // hurricane fading finish in 1000m", then "wait, change to 800m"; SightFade, 1,500, before; the mist keeps SightFade)
+        internal const float StormSightFade = 800f;
+        // far clouds (a storm cloud, the mist's and its aurora) fade into the haze over this last stretch before their sight limit
         internal const float SightFade = 1500f;
         // the fade's look: the cloud's tone toward the fog colour and the cloud faded out (PuffFade), its puffs' alpha x (1 - haze) ^
         // this. At 1 a thick deck (many puffs over each other) stayed nearly solid until its last few hundred metres (probe 22, run
@@ -5644,12 +5716,18 @@ namespace BetterStorm
             return Mathf.Pow(Mathf.Clamp01(1f - haze), FadeCurve);
         }
 
-        // 0 out to the fade's start (`limit` less SightFade, or `from` when farther: a cloud is never faded over its own deck), 1 at
+        // 0 out to the fade's start (`limit` less `width`, or `from` when farther: a cloud is never faded over its own deck), 1 at
         // `limit`: how far a far cloud has gone into the haze
-        internal static float Haze(float distance, float limit, float from = 0f)
+        internal static float Haze(float distance, float limit, float from = 0f, float width = SightFade)
         {
-            float start = Mathf.Clamp(from, limit - SightFade, limit - 100f);
+            float start = Mathf.Clamp(from, limit - width, limit - 100f);
             return Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(start, limit, distance));
+        }
+
+        // this shape's storm cloud seen out to its deck's edge + this (StormEye.SightLimit)
+        internal float SightMargin
+        {
+            get { return HasEye ? HurricaneSightMargin : GameStormSightMargin; }
         }
 
         // 1 in the eye, 0 outside its edge: the sky, the rain, the clouds and their tone; 0 everywhere without an eye
@@ -5915,11 +5993,17 @@ namespace BetterStorm
         private Color appliedTint = Color.white;
         private float wallFudge = float.NaN, layerFudge = float.NaN;
         private readonly float[] frontShades = new float[FrontBright.Length];
-        // a game storm's cloud seen only within StormEyeShape.GameStormCloudDistance of its centre (§4.1, UpdateLook): its share of the
-        // way into the haze, its puffs' fade, its renderers on
+        // the storm cloud seen only within its sight limit (SightLimit, UpdateLook): its share of the way into the haze, its puffs'
+        // fade, its renderers on
         private float haze;
         private PuffFade fade;
         private bool cloudDrawn = true;
+
+        // its storm cloud seen out to here from its centre: its deck's edge + its shape's margin (StormEyeShape.SightMargin)
+        internal float SightLimit
+        {
+            get { return ringOuter + Shape.SightMargin; }
+        }
 
         internal StormEyeShape Shape { get; private set; }
 
@@ -6083,16 +6167,29 @@ namespace BetterStorm
                 }
             }
 
+            // the whole cloud faded into the haze toward its sight limit (UpdateLook)
+            eye.fade = new PuffFade();
+            eye.fade.Add(layer);
+            for (int i = 0; i < eye.walls.Count; i++)
+            {
+                eye.fade.Add(eye.walls[i].Particles);
+            }
+
+            for (int i = 0; i < eye.fronts.Count; i++)
+            {
+                eye.fade.Add(eye.fronts[i].Particles);
+            }
+
             eye.UpdateRing(WeatherStorms.instance);
             eyes[storm] = eye;
             return eye;
         }
 
-        // The game's storms: the storm cloud, no eye, the game's radius kept, the cloud shown out to the outer edge (their template
-        // stays without it: the custom storms are cloned from it first).
+        // The game's storms: the storm cloud, no eye, the game's radius kept, the cloud emitted out to its sight limit (UpdateRing; their
+        // template stays without it: the custom storms are cloned from it first).
         internal static void BuildForGameStorm(WanderingStorm storm)
         {
-            float distance = StormAccess.ParticleDistance(storm);
+            float distance = StormAccess.ParticleDistance(storm);   // the game's own, read before Build's UpdateRing sets it
             StormEye eye = Build(storm, StormEyeShape.GameStorm);
             if (eye == null)
             {
@@ -6100,13 +6197,6 @@ namespace BetterStorm
             }
 
             eye.saved.CloudDistance = distance;
-            StormAccess.ParticleDistance(storm) = StormEyeShape.GameStormCloudDistance;
-            eye.fade = new PuffFade();
-            eye.fade.Add(eye.layer);
-            for (int i = 0; i < eye.fronts.Count; i++)
-            {
-                eye.fade.Add(eye.fronts[i].Particles);
-            }
         }
 
         // Takes a game storm's storm cloud off at once and puts its layer and cloud distance back (Better Storm's shutdown).
@@ -6377,6 +6467,9 @@ namespace BetterStorm
             }
 
             ringOuter = outer;
+            // emitted out to its sight limit, where the fade has it hidden, so it fills unseen (the game's WanderingStorm.Update reads
+            // this for its storms, the Hurricane's controller SightLimit)
+            StormAccess.ParticleDistance(storm) = SightLimit;
             Volume(layer, inner, outer, StormEyeShape.TierDepth, StormEyeShape.Puffs(inner, outer, StormEyeShape.LayerPerKm2));
             for (int i = 0; i < fronts.Count; i++)
             {
@@ -6413,18 +6506,18 @@ namespace BetterStorm
             white.a = 1f;
             dark.a = 1f;
             wallDark.a = 1f;
-            // a game storm's cloud seen within GameStormCloudDistance of its centre (LOOK_UPDATE_DRAFT.md §4.1): over its last SightFade
-            // (never over its own deck: in Emerald and the Lagoon the full-cloud line, 10,920, is past the fade's start) its tones toward
-            // the fog colour (Hazed) and its puffs faded out (FadeShare); past the limit not drawn
-            haze = Shape.HasEye ? 0f : StormEyeShape.Haze(distance, StormEyeShape.GameStormCloudDistance, ringOuter);
+            // a storm cloud seen within its sight limit (SightLimit, its deck's edge + its margin): over its last StormSightFade (never
+            // over its own deck) its tones toward the fog colour (Hazed) and its puffs faded out (FadeShare); past the limit not drawn
+            haze = StormEyeShape.Haze(distance, SightLimit, ringOuter, StormEyeShape.StormSightFade);
             ShowCloud(haze < 1f);
             fade?.Set(StormEyeShape.FadeShare(haze));
             if (!cloudDrawn)
             {
-                // a game storm's cloud past its sight limit (the Hurricane's is always drawn): nothing of it is drawn, so its tones and
-                // draw order (36 front sectors' bounds read and fudges set) wait, set again below the frame it shows; its puffs' sun
-                // tint goes on, as they live on (the eyes' LateUpdate took 110-122 us a frame for 4 storms, BetterStorm_TEST_RESULTS.md)
+                // a storm cloud past its sight limit: nothing of it is drawn, so its tones and draw order (36 front sectors' bounds
+                // read and fudges set) wait, set again below the frame it shows; its puffs' sun tint goes on, as they live on (the
+                // eyes' LateUpdate took 110-122 us a frame for 4 storms, BetterStorm_TEST_RESULTS.md); the Hurricane's cover goes with it
                 UpdateSunTint();
+                cover?.Show(0f);
                 return;
             }
 
@@ -6494,8 +6587,10 @@ namespace BetterStorm
                 cover.CoverBand(coverFrom, coverTo);
             }
 
-            // the cover, as thick as the deck (its live puffs), not drawn where no direction needs it
-            float coverShown = deckShown > 0f && UpdateCover(offset, distance, clearness, viewer.y, view.farClipPlane) ? deckShown : 0f;
+            // the cover, as thick as the deck (its live puffs) and faded with it toward its sight limit, not drawn where no direction
+            // needs it
+            float coverShown = deckShown > 0f && UpdateCover(offset, distance, clearness, viewer.y, view.farClipPlane)
+                ? deckShown * StormEyeShape.FadeShare(haze) : 0f;
             cover.Tone = deckTone;
             cover.RenderedTone = deckRendered;
             cover.SunLift = deckLift;
@@ -7059,8 +7154,10 @@ namespace BetterStorm
         // all the time, the fog bank and the aurora shouldn't be seen from too far away", then of 8, 10, 12 or 15 km "12km"; 2026-11-01:
         // "Aurora and it's mist showing distance to 9km", then "change the aurora and mist to 9.5km visible, still release as 1.2.2"), so
         // seen whole only within 8,000, 1,000 outside its outer edge (7,000); out to the camera's far clip (21,500) before 1.2.2, 12,000
-        // in its first build
-        internal const float CloudDistance = 9500f;
+        // in its first build, 9,500 to 2026-11-03. Now its outer edge + this (the user, 2026-11-03: "change the visible range of mist to
+        // outer edge + 6000, fade from outer edge + 4500"): 13,000, fading from 11,500 (the shared SightFade, 1,500)
+        internal const float SightMargin = 6000f;
+        internal const float CloudDistance = OuterEdge + SightMargin;
         // its storm cloud wraps the aurora (the user: "the storm for mist should be bigger than aurora, so you can see aurora
         // going in and out of the storm"): a disc inside the ring and a ring just outside it, low enough that the curtains'
         // tops (1,700-2,800) stand over it (probe 7, 2026-10-25: 4,200 puffs 1,250 deep hid the curtains whole). The ring
