@@ -613,13 +613,14 @@ namespace BetterStorm
         // The storm's activity, once a second, as the game takes its own storms' (WanderingStorm.Update): the place's say asked again
         // only while the storm is over RegionCheckDistance away (`distance`, level), so a player inside it who crosses into a region or
         // season where it isn't allowed keeps it until it is that far off (the user, 2026-11-02: "copy games"; before, it switched off
-        // at once). Also asked while the game has just started or loaded (GameState.justStarted, until 2 s after the player presses F),
-        // or a storm loaded near the player would keep the start menu's answer, its camera in another region. Switched off, and the
-        // Magnetic Mist near land, at once as before. A storm its chance left dormant is off too (StormChance), but ShouldBeActive,
-        // which the reset asks, leaves the roll out: a dormant storm still resets, and rolls again.
+        // at once). Also asked while the game has just started or loaded (GameState.justStarted, and after a load justStarted2, until
+        // 3 s after the player's controller comes on), or a storm loaded near the player would keep the start menu's answer, its
+        // camera in another region. Switched off, and the Magnetic Mist near land, at once as before. A storm its chance left dormant
+        // is off too (StormChance), but ShouldBeActive, which the reset asks, leaves the roll out: a dormant storm still resets, and
+        // rolls again.
         private bool UpdateActive(float distance)
         {
-            if (distance > RegionCheckDistance || GameState.justStarted || GameState.currentlyLoading)
+            if (distance > RegionCheckDistance || GameState.justStarted || GameState.justStarted2 || GameState.currentlyLoading)
             {
                 allowedHere = AllowedHere();
             }
@@ -1391,6 +1392,8 @@ namespace BetterStorm
                     StormEye.RemoveFromGameStorm(originalStorms[i]);
                 }
             }
+
+            StormEye.MoonBack();
 
             for (int i = 0; i < CustomStorms.Count; i++)
             {
@@ -2748,6 +2751,7 @@ namespace BetterStorm
 
         private static Transform cachedBoat;
         private static CleanableObject cachedCleanable;
+        private static CleanableObject[] cachedExtras;   // the boat's other dirt-holding parts (SaveableObject.extraCleanables)
         private static float exposureTimer;
 
         internal static void Tick()
@@ -2766,6 +2770,7 @@ namespace BetterStorm
 
             if (ApplyVanillaDirt(cleanable))
             {
+                ApplyExtraDirt();
                 exposureTimer -= ApplicationInterval;
             }
         }
@@ -2774,7 +2779,25 @@ namespace BetterStorm
         {
             cachedBoat = null;
             cachedCleanable = null;
+            cachedExtras = null;
             exposureTimer = 0f;
+        }
+
+        private static void ApplyExtraDirt()
+        {
+            if (cachedExtras == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < cachedExtras.Length; i++)
+            {
+                CleanableObject extra = cachedExtras[i];
+                if (extra != null && extra.isActiveAndEnabled)
+                {
+                    ApplyVanillaDirt(extra);
+                }
+            }
         }
 
         private static bool TryGetExposedCleanable(
@@ -2812,6 +2835,9 @@ namespace BetterStorm
                 SaveableObject saveable = boat.GetComponent<SaveableObject>();
                 cachedCleanable = saveable != null
                     ? saveable.GetCleanable()
+                    : null;
+                cachedExtras = saveable != null
+                    ? saveable.extraCleanables
                     : null;
                 exposureTimer = 0f;
             }
@@ -3344,21 +3370,29 @@ namespace BetterStorm
         }
     }
 
-    // Alternative Ocean Color (GUID DogEggz.AlternativeEmeraldSea, the user's mod; 1.2.x) read by reflection, its types being internal:
-    // its preset's change to the clear weather here, and its weight on Gentle Snow's blended weather, so that Gentle Snow follows it (the
-    // user, 2026-11-02: "when alternative ocean color is on every things based on it's color temperature and adjust from there"; their
-    // picks in LOOK_UPDATE_DRAFT.md §1). AOC keeps a contribution per weather set (PaletteRegistry: each region's clear-weather share,
-    // Emerald, Aestrin and Chronos) and replaces that share of the palette with its preset by day (Plugin.ApplyPalette). Without AOC, or
-    // when a member is missing (a warning once), nothing changes.
+    // Alternative Ocean Color (GUID DogEggz.AlternativeEmeraldSea, 1.2.x) read by reflection, its types being internal (Weigh's part
+    // bound once as delegates, WeighBinder): its preset's change to the clear weather here, and its weight on Gentle Snow's blended
+    // weather, so that Gentle Snow follows its colours. AOC keeps a contribution per weather set (PaletteRegistry: each region's
+    // clear-weather share, Emerald, Aestrin and Chronos) and replaces that share of the palette with its preset by day
+    // (Plugin.ApplyPalette). Without AOC, or when a member is missing (a warning once), nothing changes.
     internal static class AlternativeOceanColorLink
     {
-        private static bool searched, broken;
+        private static bool looked, searched, broken;
+        private static PluginInfo aocInfo;       // AOC's plugin as found at Better Storm's start (Found), null without it
         private static PropertyInfo instance, active;
         private static PropertyInfo[] presets;   // the presets of Emerald (SelectedPreset), Aestrin and Chronos
         private static FieldInfo[] parts;        // RegionalContribution's Emerald, Aestrin and Chronos
-        private static MethodInfo apply, get, set, blend;
+        private static MethodInfo apply, get;
         private static FieldInfo contribution, dayWeight, weight;
-        private static readonly object[] OneArg = new object[1], TwoArgs = new object[2], ThreeArgs = new object[3], FourArgs = new object[4];
+        private static Action<WeatherSet, WeatherSet, WeatherSet, float> weigh;   // WeighBinder
+        private static readonly object[] OneArg = new object[1], FourArgs = new object[4];
+
+        // AOC's plugin info, or null when it is not loaded (BetterStormPlugin.Start)
+        internal static void Found(PluginInfo info)
+        {
+            aocInfo = info;
+            looked = true;
+        }
 
         private static bool Ready()
         {
@@ -3367,37 +3401,117 @@ namespace BetterStorm
                 return !broken;
             }
 
+            if (!looked)
+            {
+                return false;
+            }
+
             searched = true;
-            Type plugin = AccessTools.TypeByName("AlternativeEmeraldSea.Plugin");
-            Type registry = AccessTools.TypeByName("AlternativeEmeraldSea.PaletteRegistry");
-            Type regional = AccessTools.TypeByName("AlternativeEmeraldSea.RegionalContribution");
-            Type part = AccessTools.TypeByName("AlternativeEmeraldSea.PaletteContribution");
-            if (plugin == null || registry == null || regional == null || part == null)
+            PluginInfo info = aocInfo;
+            if (info == null || info.Instance == null)
             {
                 broken = true;   // not installed
                 return false;
             }
 
-            instance = AccessTools.Property(plugin, "Instance");
-            active = AccessTools.Property(plugin, "Active");
-            presets = new[] { AccessTools.Property(plugin, "SelectedPreset"), AccessTools.Property(plugin, "AestrinPreset"), AccessTools.Property(plugin, "ChronosPreset") };
-            parts = new[] { AccessTools.Field(regional, "Emerald"), AccessTools.Field(regional, "Aestrin"), AccessTools.Field(regional, "Chronos") };
-            apply = AccessTools.Method(plugin, "ApplyPalette");
-            get = AccessTools.Method(registry, "Get");
-            set = AccessTools.Method(registry, "Set");
-            blend = AccessTools.Method(regional, "Blend");
-            contribution = AccessTools.Field(plugin, "contribution");
-            dayWeight = AccessTools.Field(plugin, "dayWeight");
-            weight = AccessTools.Field(part, "Weight");
-            broken = instance == null || active == null || Array.IndexOf(presets, null) >= 0 || Array.IndexOf(parts, null) >= 0 || apply == null ||
-                get == null || set == null || blend == null || contribution == null || dayWeight == null || weight == null;
-            if (broken)
+            Type plugin = info.Instance.GetType();
+            Assembly aoc = plugin.Assembly;
+            Type registry = aoc.GetType("AlternativeEmeraldSea.PaletteRegistry");
+            Type regional = aoc.GetType("AlternativeEmeraldSea.RegionalContribution");
+            Type part = aoc.GetType("AlternativeEmeraldSea.PaletteContribution");
+            broken = registry == null || regional == null || part == null;
+            if (!broken)
             {
-                BetterStormPlugin.Instance?.LogFeatureWarning("Gentle Snow: Alternative Ocean Color " + plugin.Assembly.GetName().Version +
-                    " is not the 1.2 Better Storm reads; Gentle Snow does not follow its colours.");
+                instance = AccessTools.Property(plugin, "Instance");
+                active = AccessTools.Property(plugin, "Active");
+                presets = new[] { AccessTools.Property(plugin, "SelectedPreset"), AccessTools.Property(plugin, "AestrinPreset"), AccessTools.Property(plugin, "ChronosPreset") };
+                parts = new[] { AccessTools.Field(regional, "Emerald"), AccessTools.Field(regional, "Aestrin"), AccessTools.Field(regional, "Chronos") };
+                apply = AccessTools.Method(plugin, "ApplyPalette");
+                get = AccessTools.Method(registry, "Get", new[] { typeof(WeatherSet) });
+                MethodInfo set = AccessTools.Method(registry, "Set", new[] { typeof(WeatherSet), regional });
+                MethodInfo blend = AccessTools.Method(regional, "Blend", new[] { regional, regional, typeof(float) });
+                contribution = AccessTools.Field(plugin, "contribution");
+                dayWeight = AccessTools.Field(plugin, "dayWeight");
+                weight = AccessTools.Field(part, "Weight");
+                broken = instance == null || active == null || Array.IndexOf(presets, null) >= 0 || Array.IndexOf(parts, null) >= 0 || apply == null ||
+                    get == null || !get.IsStatic || get.ReturnType != regional || set == null || !set.IsStatic || blend == null ||
+                    !blend.IsStatic || blend.ReturnType != regional || contribution == null || dayWeight == null || weight == null ||
+                    weight.FieldType != typeof(float) || Array.Exists(parts, p => p.FieldType != part);
+                if (!broken)
+                {
+                    try
+                    {
+                        weigh = BindWeigh(regional, part, set, blend);
+                        return true;
+                    }
+                    catch (Exception e)
+                    {
+                        Fail(e);
+                        return false;
+                    }
+                }
             }
 
-            return !broken;
+            BetterStormPlugin.Instance?.LogFeatureWarning("Gentle Snow: Alternative Ocean Color " + info.Metadata.Version +
+                " is not the 1.2 Better Storm reads; Gentle Snow does not follow its colours.");
+            return false;
+        }
+
+        // WeighBinder made for AOC's two internal struct types at run time (the game's runtime has no Reflection.Emit)
+        private static Action<WeatherSet, WeatherSet, WeatherSet, float> BindWeigh(Type regional, Type part, MethodInfo set, MethodInfo blend)
+        {
+            MethodInfo bind = typeof(WeighBinder<,>).MakeGenericType(regional, part).GetMethod("Bind", BindingFlags.Static | BindingFlags.NonPublic);
+            try
+            {
+                return (Action<WeatherSet, WeatherSet, WeatherSet, float>)bind.Invoke(null, new object[] { get, set, blend, parts, weight });
+            }
+            catch (TargetInvocationException e) when (e.InnerException != null)
+            {
+                throw e.InnerException;
+            }
+        }
+
+        // `blended`'s contribution set to the blend of `clear`'s and `cloudy`'s at `lerp`, through delegates bound once (no reflection
+        // call, no boxing). Skipped while neither carries a weight: AOC's own BlendSets postfix has then already written the same, an
+        // empty contribution.
+        private static class WeighBinder<TRegional, TPart> where TRegional : struct where TPart : struct
+        {
+            private static Func<WeatherSet, TRegional> get;
+            private static Action<WeatherSet, TRegional> set;
+            private static Func<TRegional, TRegional, float, TRegional> blend;
+            private static AccessTools.StructFieldRef<TRegional, TPart>[] parts;
+            private static AccessTools.StructFieldRef<TPart, float> weight;
+
+            private static Action<WeatherSet, WeatherSet, WeatherSet, float> Bind(MethodInfo getMethod, MethodInfo setMethod, MethodInfo blendMethod,
+                FieldInfo[] partFields, FieldInfo weightField)
+            {
+                get = (Func<WeatherSet, TRegional>)Delegate.CreateDelegate(typeof(Func<WeatherSet, TRegional>), getMethod);
+                set = (Action<WeatherSet, TRegional>)Delegate.CreateDelegate(typeof(Action<WeatherSet, TRegional>), setMethod);
+                blend = (Func<TRegional, TRegional, float, TRegional>)Delegate.CreateDelegate(typeof(Func<TRegional, TRegional, float, TRegional>), blendMethod);
+                parts = Array.ConvertAll(partFields, f => AccessTools.StructFieldRefAccess<TRegional, TPart>(f));
+                weight = AccessTools.StructFieldRefAccess<TPart, float>(weightField);
+                return Weigh;
+            }
+
+            private static float Weight(ref TRegional contribution)
+            {
+                float sum = 0f;
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    sum += weight(ref parts[i](ref contribution));
+                }
+
+                return sum;
+            }
+
+            private static void Weigh(WeatherSet blended, WeatherSet clear, WeatherSet cloudy, float lerp)
+            {
+                TRegional one = get(clear), two = get(cloudy);
+                if (Weight(ref one) + Weight(ref two) > 0f)
+                {
+                    set(blended, blend(one, two, lerp));
+                }
+            }
         }
 
         private static void Fail(Exception e)
@@ -3417,24 +3531,11 @@ namespace BetterStorm
 
             try
             {
-                OneArg[0] = clear;
-                ThreeArgs[0] = get.Invoke(null, OneArg);
-                OneArg[0] = cloudy;
-                ThreeArgs[1] = get.Invoke(null, OneArg);
-                ThreeArgs[2] = lerp;
-                TwoArgs[0] = blended;
-                TwoArgs[1] = blend.Invoke(null, ThreeArgs);
-                set.Invoke(null, TwoArgs);
+                weigh(blended, clear, cloudy, lerp);
             }
             catch (Exception e)
             {
                 Fail(e);
-            }
-            finally
-            {
-                OneArg[0] = null;
-                Array.Clear(TwoArgs, 0, 2);
-                Array.Clear(ThreeArgs, 0, 3);
             }
         }
 
@@ -5846,9 +5947,8 @@ namespace BetterStorm
             return true;
         }
 
-        // 0.40's volumetric fog, which the game applies only in WeatherStorms.ApplyStorm (with each weather blend), so each
-        // path that skips ApplyStorm applies its own set. The game makes the region's sets with `new` (VolufogSet.LerpSets in
-        // RegionBlender every frame), and such an object reads as null to Unity's ==: they are tested by reference.
+        // The volumetric fog, which the game applies only in WeatherStorms.ApplyStorm (with each weather blend), so each path that
+        // skips ApplyStorm applies its own set. The sets are tested by reference, which skips Unity's native null check.
         internal static void ApplyVolufog(VolufogSet set)
         {
             VolufogManager manager = VolufogManager.instance;
@@ -5858,9 +5958,17 @@ namespace BetterStorm
             }
         }
 
+        // blended into the game's own scratch set (WeatherStorms.volufogSet), as ApplyStorm does; the region's sets are only read
         internal static VolufogSet LerpVolufog(VolufogSet from, VolufogSet to, float t)
         {
-            return (object)from == null || (object)to == null ? null : VolufogSet.LerpSets(from, to, t);
+            WeatherStorms storms = WeatherStorms.instance;
+            if ((object)from == null || (object)to == null || (object)storms == null || (object)storms.volufogSet == null)
+            {
+                return null;
+            }
+
+            VolufogSet.LerpSets(ref storms.volufogSet, from, to, t);
+            return storms.volufogSet;
         }
     }
 
@@ -5879,17 +5987,27 @@ namespace BetterStorm
     // - (the Hurricane's; the game's storms none since 2026-10-27) a cover over the bare sky under the deck's base (Unity's fog
     //   never covers the sky), from wherever the viewer is: a fog
     //   dome reaching in each direction up to where the deck's base ends that way, and over the whole sky under the deck
-    //   (UpdateCover). It also hides the eye's column from the storm, which a lid over the eye did until 1.2.2, and the gap under
+    //   (UpdateCover); from outside faded out by the dawn light (DawnCover). It also hides the eye's column from the storm, which a
+    //   lid over the eye did until 1.2.2, and the gap under
     //   the deck's base from outside, which a rain curtain under the front did: the user saw the lid as the eye from inside the
     //   storm and the curtain as "a darker area under the storm" (2026-10-26; EYE_LAYER_DRAFT.md §5.8).
     // Every storm cloud is white from outside the full-cloud line and inside the eye (the user: "everything should look white
     // from outside of storm, and inside of eye"): drawn there with the game's fog-free cloud shader (LitCloudsNoFog) in a tone
-    // from the fog colour x 0.85 (the storm's tone; the wall's x 0.49 near the eye) to x 0.8 (white) (a fogged cloud fades into the fog colour and read grey,
+    // from the fog colour x 0.85 (the storm's tone; the wall's x 0.49 near the eye) to x 0.8 (white; by night x NightShade too, unlit by the moon: CloudLayer) (a fogged cloud fades into the fog colour and read grey,
     // probe 14).
     // The tiers' emission follows the layer's, which the game (WanderingStorm.SetEmission) or the mod switches.
     internal sealed class StormEye : MonoBehaviour
     {
-        private const float WhiteTone = 0.8f;      // the fog colour x this: white, at any hour (probes 8 and 12)
+        private const float WhiteTone = 0.8f;      // the fog colour x this: white by day (probes 8 and 12)
+        // by night, eased in on the game's night ramp (Sun.GetNightLerp, NightWhite): the white end x NightShade at full night, the
+        // cloud's whole light then (the moon doesn't light CloudLayer), and the puffs' colour x NightPuff (UpdateSunTint), which
+        // lightning's light on the cloud scales with
+        private const float NightShade = 2f;
+        private const float NightPuff = 0.5f;
+        // the layer the storm cloud is drawn on (MoonOff): one the game's camera draws and the sun and lightning light, with only
+        // colliders on it (ShipItemSubcollider), kept from the moon's world light. Lit by the moon, the puffs (meshes turned to face the
+        // camera) on the half of the storm facing it read brighter than the other half.
+        private const int CloudLayer = 20;
         // the dark end of every fog-free storm cloud: the fog colour x this reads as the storm (probe 10); the material's own
         // colour under the fog-free shader is near black (probe 15: black puffs at the wall, a dark grey storm from outside)
         private const float StormTone = 0.85f;
@@ -5910,6 +6028,7 @@ namespace BetterStorm
         private const float CoverHighTo = 80f;
         private const float CoverSideFull = 3f;
         private const float CoverSideFeather = 9f;
+        private const float CoverDawnRamp = 2000f;   // past the deck's edge, the distance over which the dawn fade comes in (DawnCover)
         private static readonly Color PuffColour = new Color(0.906f, 0.906f, 0.906f, 0.55f);   // the layer's white
         private static readonly int EmisColorId = Shader.PropertyToID("_EmisColor");
         private static readonly Dictionary<WanderingStorm, StormEye> eyes = new Dictionary<WanderingStorm, StormEye>();
@@ -5941,6 +6060,7 @@ namespace BetterStorm
         // -1 until first set, then taken as it is (a game loaded in the eye)
         private const float EyeOpenSeconds = 1.5f;
         private float shownClearness = -1f;
+        private bool moonKept;   // the storm cloud on CloudLayer, the moon's world light kept from it (MoonOff)
         // the storm cloud drawn fog-free (its whiteness over 0): turned on from SwapOn, off only at 0, so the deck doesn't swap
         // back and forth on the full-cloud line as the ship bobs (run 20261026-095346: at depth 0.66 one shot fog-free over the
         // band's storm tone, the next fogged)
@@ -6072,6 +6192,7 @@ namespace BetterStorm
             internal float Angle, Radius, RadiusThickness, Length, Arc;
             internal Vector3 ShapeRotation, ShapePosition, ShapeScale;
             internal Material Material;
+            internal int Layer;
             internal float Fudge;
             internal float CloudDistance;
         }
@@ -6211,6 +6332,7 @@ namespace BetterStorm
             SavedLayer s = eye.saved;
             if (eye.layer != null)
             {
+                eye.layer.gameObject.layer = s.Layer;
                 eye.layer.transform.localPosition = s.LocalPosition;
                 eye.layer.transform.localRotation = s.LocalRotation;
                 ParticleSystem.MainModule main = eye.layer.main;
@@ -6304,7 +6426,8 @@ namespace BetterStorm
                 ShapeRotation = shape.rotation,
                 ShapePosition = shape.position,
                 ShapeScale = shape.scale,
-                Material = renderer.sharedMaterial
+                Material = renderer.sharedMaterial,
+                Layer = layer.gameObject.layer
             };
         }
 
@@ -6433,6 +6556,11 @@ namespace BetterStorm
             Camera view = Camera.main;   // not cached: the user plays with a free camera
             if (view != null)
             {
+                if (!moonKept)
+                {
+                    moonKept = MoonOff(view);
+                }
+
                 UpdateLook(weatherStorms, view);
             }
         }
@@ -6501,7 +6629,7 @@ namespace BetterStorm
             // end as built (0.85 and 0.8): at 0.85 against a white end of 0.72 the deck read 155-157 at depth 0.8 over a cover of 146
             // (run 20261026-093202)
             deckFog = RenderSettings.fogColor;
-            Color white = deckFog * WhiteTone, dark = deckFog * (StormTone * LayerBright);
+            Color white = deckFog * (WhiteTone * NightWhite()), dark = deckFog * (StormTone * LayerBright);
             Color wallDark = RenderSettings.fogColor * WallStormTone;
             white.a = 1f;
             dark.a = 1f;
@@ -6590,13 +6718,64 @@ namespace BetterStorm
             // the cover, as thick as the deck (its live puffs) and faded with it toward its sight limit, not drawn where no direction
             // needs it
             float coverShown = deckShown > 0f && UpdateCover(offset, distance, clearness, viewer.y, view.farClipPlane)
-                ? deckShown * StormEyeShape.FadeShare(haze) : 0f;
+                ? deckShown * StormEyeShape.FadeShare(haze) * DawnCover(distance) : 0f;
             cover.Tone = deckTone;
             cover.RenderedTone = deckRendered;
             cover.SunLift = deckLift;
             // in the eye the band over it (StormHorizonFog) reads the colour as the camera renders: the same there, so no step
             cover.BaseFog = clearness > 0f ? (Color?)null : deckFog;
             cover.Show(coverShown);
+        }
+
+        // the cover's share seen from outside the deck: faded by the dawn light (Sun.GetDawnLerp, the hours the sun's tint stays on the
+        // cloud, UpdateSunTint), against which its flat tone reads as a dark straight band under the cloud; inside the deck kept whole
+        private float DawnCover(float distance)
+        {
+            float dawn = Sun.sun != null ? Sun.sun.GetDawnLerp() : 0f;
+            return 1f - dawn * Mathf.InverseLerp(ringOuter, ringOuter + CoverDawnRamp, distance);
+        }
+
+        // the white end's share at this hour: 1 by day, NightShade at full night, along the ramp the game's palette takes into night
+        internal static float NightWhite()
+        {
+            return Sun.sun != null ? Mathf.Lerp(1f, NightShade, Sun.sun.GetNightLerp()) : 1f;
+        }
+
+        // The storm cloud (the layer and every tier) put on CloudLayer and the moon's world light kept from it, once the view draws that
+        // layer and the sun and the moon are there (the game sets its sun in Sun.Start, after the storm clouds are built); false until
+        // then, the cloud left on its own layer.
+        private bool MoonOff(Camera view)
+        {
+            int bit = 1 << CloudLayer;
+            Light sun = RenderSettings.sun;
+            Light moon = Moon.instance != null ? Moon.instance.moonlightWorld : null;
+            if ((view.cullingMask & bit) == 0 || sun == null || (sun.cullingMask & bit) == 0 || moon == null)
+            {
+                return false;
+            }
+
+            moon.cullingMask &= ~bit;
+            layer.gameObject.layer = CloudLayer;
+            for (int i = 0; i < walls.Count; i++)
+            {
+                walls[i].Particles.gameObject.layer = CloudLayer;
+            }
+
+            for (int i = 0; i < fronts.Count; i++)
+            {
+                fronts[i].Particles.gameObject.layer = CloudLayer;
+            }
+
+            return true;
+        }
+
+        // the moon's world light on CloudLayer again (Better Storm's shutdown)
+        internal static void MoonBack()
+        {
+            if (Moon.instance != null && Moon.instance.moonlightWorld != null)
+            {
+                Moon.instance.moonlightWorld.cullingMask |= 1 << CloudLayer;
+            }
         }
 
         // the eye's clearness as shown: toward the distance's by at most 1 / EyeOpenSeconds a second (the game's time)
@@ -6667,7 +6846,8 @@ namespace BetterStorm
             }
         }
 
-        // The puffs' start colours x the sun's tint taken out (SunNeutral); the live puffs too when it jumps
+        // The puffs' start colours x the sun's tint taken out (SunNeutral) and x the night's dimming (NightPuff); the live puffs too when
+        // it jumps
         private void UpdateSunTint()
         {
             Color tint = Color.white;
@@ -6682,6 +6862,9 @@ namespace BetterStorm
                     tint = new Color(Mathf.Lerp(1f, least / c.r, share), Mathf.Lerp(1f, least / c.g, share), Mathf.Lerp(1f, least / c.b, share), 1f);
                 }
             }
+
+            float dim = Sun.sun != null ? Mathf.Lerp(1f, NightPuff, Sun.sun.GetNightLerp()) : 1f;
+            tint = new Color(tint.r * dim, tint.g * dim, tint.b * dim, 1f);
 
             float moved = Mathf.Max(Mathf.Abs(tint.r - appliedTint.r), Mathf.Max(Mathf.Abs(tint.g - appliedTint.g), Mathf.Abs(tint.b - appliedTint.b)));
             if (moved < TintStep)
@@ -8815,15 +8998,16 @@ namespace BetterStorm
         internal static void DeckTone(float outside, float clearness, out float rendered, out float before, out float sunLift)
         {
             float white = Mathf.InverseLerp(0f, WhiteWithin, outside);
+            float night = StormEye.NightWhite();
             rendered = FoggedDeckTone * (1f - white);
-            before = OutsideWhiteTone * white;
+            before = OutsideWhiteTone * white * night;
             float lift = OutsideSunLift;
             if (clearness > 0f)
             {
                 // into the eye's tone over its first fifth (it was a step at the clearing's edge; the cover now takes the whole sky)
                 float eye = Mathf.InverseLerp(0f, EyeToneWithin, clearness);
                 rendered *= 1f - eye;
-                before = Mathf.Lerp(before, Mathf.Lerp(EyeStormTone, WhiteDeckTone, clearness), eye);
+                before = Mathf.Lerp(before, Mathf.Lerp(EyeStormTone, WhiteDeckTone * night, clearness), eye);
                 lift = Mathf.Lerp(lift, EyeSunLift, eye);
             }
 

@@ -26,7 +26,7 @@ namespace BetterStorm
     {
         public const string PluginGuid = "DogEggz.BetterStorm";
         public const string PluginName = "Better Storm";
-        public const string PluginVersion = "1.2.4";
+        public const string PluginVersion = "1.2.5";
 
         public const string ChaoticWindGuid = "com.pete.sailwind.windconfigurator";
         public const string ClimateGuid = "com.raddude.climate";
@@ -35,6 +35,7 @@ namespace BetterStorm
         public const string WindTotemGuid = "DogEggz.WindTotem";
         public const string RealisticSkiesGuid = "com.kingcam16.realisticskies";
         public const string KemyNavigationGuid = "com.larsonlogistics.sailwind.navsuite";
+        public const string AlternativeOceanColorGuid = "DogEggz.AlternativeEmeraldSea";
 
         private Harmony harmony;
         private readonly Dictionary<CustomStormId, ConfigEntry<bool>>
@@ -117,6 +118,12 @@ namespace BetterStorm
             KemyNavigationCompatibility.Install(harmony);
             ApplyRuntimeSettings();
             Logger.LogInfo(PluginName + " " + PluginVersion + " loaded.");
+        }
+
+        // every plugin is loaded by the first frame
+        private void Start()
+        {
+            AlternativeOceanColorLink.Found(Chainloader.PluginInfos.TryGetValue(AlternativeOceanColorGuid, out PluginInfo aoc) ? aoc : null);
         }
 
         private void Update()
